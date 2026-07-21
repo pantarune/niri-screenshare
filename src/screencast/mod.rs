@@ -227,7 +227,10 @@ impl ScreenCastInterface {
             let size = get_window_size(wid).unwrap_or((960, 1048));
             (stream, size.0, size.1)
         } else {
-            let name = output_name.as_deref().unwrap_or("HDMI-A-1");
+            let name = output_name.as_deref().unwrap_or_else(|| {
+                tracing::warn!("no output selected, falling back to HDMI-A-1");
+                "HDMI-A-1"
+            });
             let stream = record_niri_monitor(&conn, &niri_session, name, cursor_mode).await
                 .map_err(|e| fdo::Error::Failed(format!("record monitor: {e}")))?;
             let size = get_output_size(name).unwrap_or((1920, 1080));

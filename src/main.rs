@@ -1,4 +1,5 @@
 mod niri_ipc;
+mod portal_config;
 mod screencast;
 
 #[tokio::main]
@@ -8,6 +9,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::info!("starting niri-screenshare");
+    portal_config::ensure_portals_config();
 
     let conn = zbus::connection::Builder::session()?
         .name("org.freedesktop.impl.portal.desktop.niri")?
