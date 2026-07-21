@@ -44,14 +44,14 @@ without this, the portal daemon would fall back to `UseIn=gnome` matching (which
 
 **dynamic cast (default)** — `select_sources` returns immediately and auto-selects the focused output. the stream target can be changed at any time using niri's dynamic cast keybinds (`set-dynamic-cast-monitor`, `set-dynamic-cast-window`). no picker dialog, no friction.
 
-**picker mode** — build with the `picker` feature and set `NIRI_SCREENSHARE_PICKER=1` to show a zenity dialog listing available monitors:
+**picker mode** — build with the `picker` feature and set `NIRI_SCREENSHARE_PICKER=1` to show a zenity dialog listing available monitors and windows:
 
 ```bash
 cargo build --release --features picker
 NIRI_SCREENSHARE_PICKER=1 /usr/lib/niri-screenshare
 ```
 
-this is useful when multiple monitors are connected and you want to choose which one to share at selection time.
+the dialog shows all monitors and windows (when the app requests window sharing). apps that pass `source_type=3` will see both monitors and windows in the list.
 
 | build | behavior | binary size |
 |-------|----------|-------------|
