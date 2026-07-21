@@ -16,7 +16,7 @@ both call `org.gnome.Mutter.ScreenCast` on niri either way.
 ## install
 
 ```
-paru -S xdg-desktop-portal-niri
+paru -S niri-screenshare
 ```
 
 or build manually:
