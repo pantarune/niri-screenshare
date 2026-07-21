@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.niri
+Exec=/usr/lib/xdg-desktop-portal-niri
+SystemdService=xdg-desktop-portal-niri.service

@@ -1,0 +1,22 @@
+[package]
+name = "xdg-desktop-portal-niri"
+version = "0.1.0"
+edition = "2021"
+description = "xdg-desktop-portal backend for the niri compositor"
+
+[dependencies]
+zbus = { version = "5", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wayland-client = { version = "0.31", features = ["dlopen"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
+pipewire = "0.10"
+libspa = "0.10"
+tracing = "0.1"
+futures-util = "0.3"
+tracing-subscriber = "0.3"
+anyhow = "1"
+libc = "0.2"
+

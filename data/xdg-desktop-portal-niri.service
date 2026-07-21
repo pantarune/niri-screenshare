@@ -1,0 +1,12 @@
+[Unit]
+Description=Portal service (niri backend)
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.niri
+ExecStart=/usr/lib/xdg-desktop-portal-niri
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
