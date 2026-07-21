@@ -168,6 +168,9 @@ impl ScreenCastInterface {
                     session.output_name = None;
                     session.window_id = Some(id);
                 }
+                None if session.source_type & 2 != 0 => {
+                    return Err(fdo::Error::Failed("user cancelled selection".into()));
+                }
                 None => {
                     session.source_type = 1;
                     session.output_name = niri_ipc::focused_output_name().ok();
@@ -220,7 +223,7 @@ impl ScreenCastInterface {
         let niri_session = create_niri_session(&conn).await
             .map_err(|e| fdo::Error::Failed(format!("create session: {e}")))?;
 
-        let (niri_stream, width, height) = if source_type == 2 {
+        let (niri_stream, width, height) = if source_type & 2 != 0 {
             let wid = window_id.ok_or_else(|| fdo::Error::Failed("no window id".into()))?;
             let stream = record_niri_window(&conn, &niri_session, wid, cursor_mode).await
                 .map_err(|e| fdo::Error::Failed(format!("record window: {e}")))?;
@@ -251,7 +254,7 @@ impl ScreenCastInterface {
 
         let mut results = HashMap::new();
         let mut sp: HashMap<String, Value<'_>> = HashMap::new();
-        sp.insert("source_type".into(), Value::from(1u32));
+        sp.insert("source_type".into(), Value::from(if source_type & 2 != 0 { 2u32 } else { 1u32 }));
         sp.insert("size".into(), Value::from((width as i32, height as i32)));
         let stream_val: Value<'_> = (node_id, sp).into();
         let mut arr = Array::new(&Signature::from_bytes(b"(ua{sv})").unwrap());

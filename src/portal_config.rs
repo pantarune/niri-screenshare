@@ -42,17 +42,19 @@ fn patch_existing(path: &Path) -> std::io::Result<bool> {
     let mut in_preferred = false;
 
     for line in content.lines() {
+        let trimmed = line.trim();
+
         if in_preferred && !inserted
-            && (line.trim().starts_with('[') || line.trim().is_empty())
-            && line.trim() != "[preferred]"
+            && trimmed.starts_with('[')
+            && trimmed != "[preferred]"
         {
             out.push_str(&entry);
             out.push('\n');
             inserted = true;
-            in_preferred = in_preferred && line.trim().starts_with('[');
+            in_preferred = false;
         }
 
-        if line.trim() == "[preferred]" {
+        if trimmed == "[preferred]" {
             in_preferred = true;
         }
 
