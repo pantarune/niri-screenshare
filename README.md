@@ -5,7 +5,6 @@ portal backend for niri. replaces `xdg-desktop-portal-gnome` for screen sharing.
 ## why
 
 niri's wiki tells you to install `xdg-desktop-portal-gnome` for screencasting. it works but pulls in half of gnome. this does the same thing without the bloat.
-
 both call `org.gnome.Mutter.ScreenCast` on niri either way.
 
 ## install
@@ -41,10 +40,7 @@ without this, the portal daemon would fall back to `UseIn=gnome` matching (which
 - `default=gtk` — routes stuff like file picker to the lightweight gtk portal instead of gnome's (avoids pulling nautilus)
 - `ScreenCast=niri` — routes screen sharing to this backend
 
-## depends
-
-- niri, pipewire
-
 ## how
 
-app → portal daemon → our backend → niri's Mutter.ScreenCast → PipeWire. niri handles the gpu capture, we just relay the pipewire node id.
+app → portal daemon → our backend → niri's Mutter.ScreenCast → PipeWire. 
+niri handles the gpu capture, we just relay the pipewire node id.
