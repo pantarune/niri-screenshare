@@ -21,6 +21,7 @@ pub fn list_outputs() -> anyhow::Result<Vec<NiriOutput>> {
     parse_outputs(&raw)
 }
 
+#[allow(dead_code)]
 pub struct NiriWindow {
     pub id: u64,
     pub title: String,
