@@ -1,11 +1,5 @@
 mod niri_ipc;
 mod screencast;
-mod screencopy;
-
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,17 +9,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("starting xdg-desktop-portal-niri");
 
-    let state = Arc::new(Mutex::new(HashMap::new()));
-
     let conn = zbus::connection::Builder::session()?
         .name("org.freedesktop.impl.portal.desktop.niri")?
         .build()
         .await?;
 
-    let screencast = screencast::ScreenCastInterface {
-        state: state.clone(),
-        conn: Some(conn.clone()),
-    };
+    let screencast = screencast::ScreenCastInterface::new(conn.clone());
 
     conn.object_server()
         .at("/org/freedesktop/portal/desktop", screencast)

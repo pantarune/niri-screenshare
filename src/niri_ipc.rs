@@ -1,30 +1,13 @@
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::process::Command;
 
-#[derive(Debug, Deserialize)]
-pub struct LogicalGeometry {
-    pub x: i32,
-    pub y: i32,
+pub struct Size {
     pub width: i32,
     pub height: i32,
-    pub scale: f64,
 }
 
-#[derive(Debug, Deserialize)]
 pub struct NiriOutput {
     pub name: String,
-    pub logical: LogicalGeometry,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct NiriWindow {
-    pub id: u64,
-    pub title: String,
-    #[serde(rename = "app-id", default)]
-    pub app_id: String,
-    #[serde(default)]
-    pub is_focused: bool,
+    pub logical: Size,
 }
 
 pub fn list_outputs() -> anyhow::Result<Vec<NiriOutput>> {
@@ -35,10 +18,7 @@ pub fn list_outputs() -> anyhow::Result<Vec<NiriOutput>> {
         anyhow::bail!("niri msg outputs failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     let raw = String::from_utf8(out.stdout)?;
-    let map: HashMap<String, NiriOutput> = serde_json::from_str(&raw)?;
-    let mut outputs: Vec<NiriOutput> = map.into_values().collect();
-    outputs.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(outputs)
+    parse_outputs(&raw)
 }
 
 pub fn focused_output_name() -> anyhow::Result<String> {
@@ -49,6 +29,102 @@ pub fn focused_output_name() -> anyhow::Result<String> {
         anyhow::bail!("niri msg focused-output failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     let raw = String::from_utf8(out.stdout)?;
-    let output: NiriOutput = serde_json::from_str(&raw)?;
-    Ok(output.name)
+    // Extract the "name" field from the JSON object
+    extract_json_string(&raw, "name").ok_or_else(|| anyhow::anyhow!("no name field in output"))
+}
+
+fn parse_outputs(raw: &str) -> anyhow::Result<Vec<NiriOutput>> {
+    let mut outputs = Vec::new();
+    let mut rest = raw.trim();
+
+    // Expect the opening `{`
+    if !rest.starts_with('{') {
+        anyhow::bail!("expected '{{' at start of outputs");
+    }
+    rest = &rest[1..];
+
+    while let Some(end) = rest.find(|c| c == '}' || c == ',') {
+        if rest[..end].trim().is_empty() {
+            rest = &rest[end + 1..];
+            continue;
+        }
+        if &rest[end..end+1] == "}" {
+            break;
+        }
+        // Extract key (output name)
+        let colon = rest.find(':').unwrap_or(0);
+        let key = rest[..colon].trim();
+        let key = key.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+            .unwrap_or("").to_string();
+        rest = &rest[colon + 1..];
+
+        // Find the matching closing brace for the value object
+        let mut depth = 0;
+        let mut val_end = 0;
+        for (i, c) in rest.char_indices() {
+            if c == '{' { depth += 1; }
+            else if c == '}' { depth -= 1; if depth == 0 { val_end = i + 1; break; } }
+        }
+        if val_end == 0 { break; }
+        let val_str = &rest[..val_end];
+        rest = &rest[val_end..];
+
+        if let Some(out) = parse_output(val_str) {
+            outputs.push(NiriOutput {
+                name: if out.name.is_empty() { key.clone() } else { out.name },
+                logical: out.logical,
+            });
+        }
+    }
+
+    Ok(outputs)
+}
+
+struct OutputRaw {
+    name: String,
+    logical: Size,
+}
+
+fn parse_output(raw: &str) -> Option<OutputRaw> {
+    let name = extract_json_string(raw, "name").unwrap_or_default();
+    let logical_str = extract_json_object(raw, "logical")?;
+    let width = extract_json_int(&logical_str, "width")?;
+    let height = extract_json_int(&logical_str, "height")?;
+    Some(OutputRaw { name, logical: Size { width, height } })
+}
+
+fn extract_json_string(raw: &str, key: &str) -> Option<String> {
+    let search = format!("\"{}\"", key);
+    let idx = raw.find(&search)?;
+    let after_key = &raw[idx + search.len()..];
+    let colon = after_key.find(':')?;
+    let after_colon = after_key[colon + 1..].trim().strip_prefix('"')?;
+    let end = after_colon.find('"')?;
+    Some(after_colon[..end].to_string())
+}
+
+fn extract_json_int(raw: &str, key: &str) -> Option<i32> {
+    let search = format!("\"{}\"", key);
+    let idx = raw.find(&search)?;
+    let after_key = &raw[idx + search.len()..];
+    let colon = after_key.find(':')?;
+    let num_str = after_key[colon + 1..].trim();
+    let end = num_str.find(|c: char| !c.is_digit(10) && c != '-').unwrap_or(num_str.len());
+    num_str[..end].parse().ok()
+}
+
+fn extract_json_object<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
+    let search = format!("\"{}\"", key);
+    let idx = raw.find(&search)?;
+    let after_key = &raw[idx + search.len()..];
+    let colon = after_key.find(':')?;
+    let after_colon = after_key[colon + 1..].trim();
+    if !after_colon.starts_with('{') { return None; }
+    let mut depth = 0;
+    let mut end = 0;
+    for (i, c) in after_colon.char_indices() {
+        if c == '{' { depth += 1; }
+        else if c == '}' { depth -= 1; if depth == 0 { end = i + 1; break; } }
+    }
+    if end == 0 { None } else { Some(&after_colon[..end]) }
 }
