@@ -249,7 +249,7 @@ async fn record_niri_monitor(
     cursor_mode: u32,
 ) -> anyhow::Result<String> {
     let mut opts: HashMap<&str, OwnedValue> = HashMap::new();
-    opts.insert("cursor_mode", OwnedValue::from(cursor_mode));
+    opts.insert("cursor-mode", OwnedValue::from(cursor_mode));
     let msg = conn.call_method(Some(MUTTER_SCREENCAST_DEST), session_path,
         Some("org.gnome.Mutter.ScreenCast.Session"), "RecordMonitor",
         &(monitor, opts),
