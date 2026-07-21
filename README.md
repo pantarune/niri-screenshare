@@ -1,4 +1,4 @@
-# xdg-desktop-portal-niri
+# niri-screenshare
 
 portal backend for niri, implements ScreenCast.
 
