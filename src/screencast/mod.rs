@@ -21,7 +21,6 @@ pub struct ScreenCastInterface {
 }
 
 struct CaptureSession {
-    app_id: String,
     started: bool,
     niri_session_path: Option<String>,
     niri_stream_path: Option<String>,
@@ -73,21 +72,20 @@ impl ScreenCastInterface {
     #[zbus(property, name = "version")]
     fn version_prop(&self) -> u32 { 5 }
     #[zbus(property)]
-    fn AvailableSourceTypes(&self) -> u32 { 1 }
+    fn available_source_types(&self) -> u32 { 1 }
     #[zbus(property)]
-    fn AvailableCursorModes(&self) -> u32 { 7 }
+    fn available_cursor_modes(&self) -> u32 { 7 }
 
     async fn create_session(
         &mut self,
         _handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
-        app_id: &str,
+        _app_id: &str,
         _options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
         tracing::info!("CreateSession: session={}", session_handle);
         let sh = session_handle.to_string();
         self.state.lock().await.insert(sh.clone(), CaptureSession {
-            app_id: app_id.to_string(),
             started: false,
             niri_session_path: None,
             niri_stream_path: None,
