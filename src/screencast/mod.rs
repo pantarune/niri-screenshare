@@ -93,7 +93,7 @@ impl ScreenCastInterface {
             niri_session_path: None,
             niri_stream_path: None,
             source_type: 1,
-            cursor_mode: 2,
+            cursor_mode: 1,
             output_name: None,
             node_id: 0,
         });
@@ -127,7 +127,7 @@ impl ScreenCastInterface {
             }
         }
         let types = options.get("types").and_then(val_u32).unwrap_or(1);
-        let cursor = options.get("cursor_mode").and_then(val_u32).unwrap_or(2);
+        let cursor = options.get("cursor_mode").and_then(val_u32).unwrap_or(1);
 
         let mut state = self.state.lock().await;
         let session = state.get_mut(session_handle.as_str()).ok_or_else(|| {
