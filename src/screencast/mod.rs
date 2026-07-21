@@ -74,7 +74,7 @@ impl ScreenCastInterface {
     #[zbus(property, name = "version")]
     fn version_prop(&self) -> u32 { 5 }
     #[zbus(property)]
-    fn AvailableSourceTypes(&self) -> u32 { 3 }
+    fn AvailableSourceTypes(&self) -> u32 { 1 }
     #[zbus(property)]
     fn AvailableCursorModes(&self) -> u32 { 7 }
 
@@ -142,7 +142,7 @@ impl ScreenCastInterface {
         tracing::info!("types={} cursor={} output={:?}", types, cursor, session.output_name);
 
         let mut results = HashMap::new();
-        results.insert("available_source_types".into(), OwnedValue::from(3u32));
+        results.insert("available_source_types".into(), OwnedValue::from(1u32));
         results.insert("available_cursor_modes".into(), OwnedValue::from(7u32));
         Ok((0, results))
     }
