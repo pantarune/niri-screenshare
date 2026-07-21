@@ -10,11 +10,16 @@ portal backend for niri, implements ScreenCast.
 | language | 17k+ lines C | 450 lines Rust |
 | binary | 640KB + gnome runtime | 1.5MB static |
 | selector | libadwaita dialog | none (auto-selects) |
-| file picker | pulls nautilus | reuses gtk portal |
 
 both call `org.gnome.Mutter.ScreenCast` on niri either way.
 
-## build
+## install
+
+```
+paru -S xdg-desktop-portal-niri
+```
+
+or build manually:
 
 ```
 cargo build --release
@@ -32,21 +37,12 @@ systemctl --user enable --now xdg-desktop-portal-niri.service
 [preferred]
 default=gtk
 org.freedesktop.impl.portal.ScreenCast=niri
-org.freedesktop.impl.portal.Secret=gnome-keyring
 ```
 
 ## depends
 
 - niri, pipewire
-- xdg-desktop-portal-gtk (file picker)
-- gnome-keyring (secrets)
 
 ## how
 
 app → portal → our backend → niri's Mutter.ScreenCast → PipeWire node. zero frame copying, niri handles the gpu capture.
-
-## aur
-
-```
-yay -S xdg-desktop-portal-niri
-```
