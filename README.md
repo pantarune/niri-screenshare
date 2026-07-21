@@ -35,6 +35,7 @@ org.freedesktop.impl.portal.Secret=gnome-keyring
 - pipewire
 - xdg-desktop-portal-gtk (file picker)
 - gnome-keyring (secrets)
+- zenity (source selector dialog)
 
 ## how
 
