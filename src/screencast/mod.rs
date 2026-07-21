@@ -27,6 +27,7 @@ pub struct CaptureSession {
     pub niri_session_path: Option<String>,
     pub niri_stream_path: Option<String>,
     pub output_name: Option<String>,
+    pub node_id: u32,
 }
 
 pub struct SessionHandler {
@@ -79,6 +80,7 @@ impl ScreenCastInterface {
             niri_session_path: None,
             niri_stream_path: None,
             output_name: None,
+            node_id: 0,
         });
         if let Some(ref conn) = self.conn {
             if let Ok(p) = ObjectPath::try_from(sh.as_str()) {
@@ -152,6 +154,7 @@ impl ScreenCastInterface {
             if let Some(session) = s.get_mut(session_handle.as_str()) {
                 session.niri_session_path = Some(niri_session);
                 session.niri_stream_path = Some(niri_stream);
+                session.node_id = node_id;
             }
         }
 
@@ -171,13 +174,24 @@ impl ScreenCastInterface {
     #[zbus(name = "OpenPipeWireRemote")]
     async fn open_pipewire_remote(
         &mut self,
-        _session_handle: ObjectPath<'_>,
+        session_handle: ObjectPath<'_>,
         _options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<ZvariantFd<'static>> {
-        let raw = pw_backend::open_pipewire_fd("")
-            .map_err(|e| fdo::Error::Failed(format!("pw: {e}")))?;
-        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
-        Ok(ZvariantFd::Owned(owned))
+        let node_id = {
+            let state = self.state.lock().await;
+            state.get(session_handle.as_str()).map(|s| s.node_id).unwrap_or(0)
+        };
+
+        if node_id == 0 {
+            // fallback: return raw socket
+            let raw = pw_backend::open_pipewire_fd("")
+                .map_err(|e| fdo::Error::Failed(format!("pw: {e}")))?;
+            return Ok(ZvariantFd::Owned(unsafe { OwnedFd::from_raw_fd(raw) }));
+        }
+
+        let raw = pw_backend::open_pipewire_with_permissions(node_id)
+            .map_err(|e| fdo::Error::Failed(format!("pw perms: {e}")))?;
+        Ok(ZvariantFd::Owned(unsafe { OwnedFd::from_raw_fd(raw) }))
     }
 
     async fn close(
