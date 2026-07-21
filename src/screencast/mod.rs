@@ -1,3 +1,5 @@
+#[cfg(feature = "picker")]
+mod pick;
 mod pw_backend;
 
 use std::collections::HashMap;
@@ -140,8 +142,24 @@ impl ScreenCastInterface {
         })?;
 
         session.cursor_mode = cursor_niri;
-        session.output_name = niri_ipc::focused_output_name().ok()
-            .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
+
+        #[cfg(feature = "picker")]
+        if std::env::var("NIRI_SCREENSHARE_PICKER").is_ok() {
+            if let Ok(outputs) = niri_ipc::list_outputs() {
+                session.output_name = pick::show_picker(&outputs);
+            } else {
+                session.output_name = None;
+            }
+        } else {
+            session.output_name = niri_ipc::focused_output_name().ok()
+                .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
+        }
+
+        #[cfg(not(feature = "picker"))]
+        {
+            session.output_name = niri_ipc::focused_output_name().ok()
+                .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
+        }
 
         tracing::info!("cursor={} output={:?}", cursor_niri, session.output_name);
 

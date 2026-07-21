@@ -40,7 +40,25 @@ without this, the portal daemon would fall back to `UseIn=gnome` matching (which
 - `default=gtk` — routes stuff like file picker to the lightweight gtk portal instead of gnome's (avoids pulling nautilus)
 - `ScreenCast=niri` — routes screen sharing to this backend
 
+## behavior
+
+**dynamic cast (default)** — `select_sources` returns immediately and auto-selects the focused output. the stream target can be changed at any time using niri's dynamic cast keybinds (`set-dynamic-cast-monitor`, `set-dynamic-cast-window`). no picker dialog, no friction.
+
+**picker mode** — build with the `picker` feature and set `NIRI_SCREENSHARE_PICKER=1` to show a zenity dialog listing available monitors:
+
+```bash
+cargo build --release --features picker
+NIRI_SCREENSHARE_PICKER=1 /usr/lib/niri-screenshare
+```
+
+this is useful when multiple monitors are connected and you want to choose which one to share at selection time.
+
+| build | behavior | binary size |
+|-------|----------|-------------|
+| `default` | dynamic cast, no dialog | 1.5 MB |
+| `--features picker` | dynamic cast + optional zenity picker | 1.5 MB |
+
 ## how
 
-app → portal daemon → our backend → niri's Mutter.ScreenCast → PipeWire. 
+app → portal daemon → our backend → niri's Mutter.ScreenCast → PipeWire.
 niri handles the gpu capture, we just relay the pipewire node id.

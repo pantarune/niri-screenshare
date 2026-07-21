@@ -3,6 +3,10 @@ name = "niri-screenshare"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+picker = []
+
 [dependencies]
 zbus = { version = "5", features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
