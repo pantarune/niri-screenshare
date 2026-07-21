@@ -2,11 +2,17 @@
 
 portal backend for niri, implements ScreenCast.
 
-## why
+## vs xdg-desktop-portal-gnome
 
-niri's wiki says to install `xdg-desktop-portal-gnome` for screencasting. it works, but drags in half of GNOME for nothing. this does the same thing without the bloat.
+| | gnome | niri-screenshare |
+|---|---|---|
+| depends | gnome-shell, libadwaita, tracker, nautilus, evolution-data-server, gvfs | nothing |
+| language | 17k+ lines C | 450 lines Rust |
+| binary | 640KB + gnome runtime | 1.5MB static |
+| selector | libadwaita dialog | none (auto-selects) |
+| file picker | pulls nautilus | reuses gtk portal |
 
-both call `org.gnome.Mutter.ScreenCast.CreateSession` on niri either way. this one just skips the GNOME middleware.
+both call `org.gnome.Mutter.ScreenCast` on niri either way.
 
 ## build
 
@@ -31,12 +37,16 @@ org.freedesktop.impl.portal.Secret=gnome-keyring
 
 ## depends
 
-- niri
-- pipewire
+- niri, pipewire
 - xdg-desktop-portal-gtk (file picker)
 - gnome-keyring (secrets)
-- zenity (source selector dialog)
 
 ## how
 
-app calls portal → portal calls our backend → we call niri's Mutter.ScreenCast → niri creates the pipewire node. zero frame copying, niri handles the gpu capture.
+app → portal → our backend → niri's Mutter.ScreenCast → PipeWire node. zero frame copying, niri handles the gpu capture.
+
+## aur
+
+```
+yay -S xdg-desktop-portal-niri
+```
