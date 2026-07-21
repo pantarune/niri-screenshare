@@ -18,12 +18,12 @@ or manually:
 
 ```
 cargo build --release
-sudo cp target/release/xdg-desktop-portal-niri /usr/lib/
+sudo cp target/release/niri-screenshare /usr/lib/
 sudo cp data/niri.portal /usr/share/xdg-desktop-portal/portals/
 sudo cp data/org.freedesktop.impl.portal.desktop.niri.service /usr/share/dbus-1/services/
-cp data/xdg-desktop-portal-niri.service ~/.config/systemd/user/
+cp data/niri-screenshare.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now xdg-desktop-portal-niri.service
+systemctl --user enable --now niri-screenshare.service
 ```
 
 ## config

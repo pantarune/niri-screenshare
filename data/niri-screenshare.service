@@ -5,7 +5,7 @@ PartOf=graphical-session.target
 [Service]
 Type=dbus
 BusName=org.freedesktop.impl.portal.desktop.niri
-ExecStart=/usr/lib/xdg-desktop-portal-niri
+ExecStart=/usr/lib/niri-screenshare
 Restart=on-failure
 
 [Install]

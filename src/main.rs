@@ -7,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    tracing::info!("starting xdg-desktop-portal-niri");
+    tracing::info!("starting niri-screenshare");
 
     let conn = zbus::connection::Builder::session()?
         .name("org.freedesktop.impl.portal.desktop.niri")?

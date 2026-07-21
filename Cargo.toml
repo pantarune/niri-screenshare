@@ -1,5 +1,5 @@
 [package]
-name = "xdg-desktop-portal-niri"
+name = "niri-screenshare"
 version = "0.1.0"
 edition = "2021"
 
