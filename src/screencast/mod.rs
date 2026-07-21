@@ -158,7 +158,7 @@ impl ScreenCastInterface {
         tracing::info!("Start: session={}", session_handle);
         let conn = self.conn.clone().ok_or_else(|| fdo::Error::Failed("no D-Bus connection".into()))?;
 
-        let (output_name, source_type, cursor_mode) = {
+        let (output_name, source_type, cursor_mode, window_size) = {
             let mut s = self.state.lock().await;
             let session = s.get_mut(session_handle.as_str()).ok_or_else(|| {
                 fdo::Error::Failed(format!("session {} not found", session_handle))
@@ -167,12 +167,27 @@ impl ScreenCastInterface {
                 return Err(fdo::Error::Failed("session already started".into()));
             }
             session.started = true;
-            (session.output_name.clone().unwrap_or_else(|| "HDMI-A-1".to_string()),
-             session.source_type,
-             session.cursor_mode)
+            let source_type = session.source_type;
+            let window_id = if source_type & 2 != 0 {
+                niri_ipc::focused_window().ok().map(|w| w.id)
+            } else {
+                None
+            };
+            let window_sz = window_id.and_then(|_| {
+                niri_ipc::focused_window().ok().map(|w| (w.window_size.width as u32, w.window_size.height as u32))
+            });
+            (session.output_name.clone(),
+             source_type,
+             session.cursor_mode,
+             window_sz)
         };
 
-        let (width, height) = get_output_size(&output_name).unwrap_or((1920, 1080));
+        let (width, height) = if source_type & 2 != 0 {
+            window_size.unwrap_or((1920, 1080))
+        } else {
+            let name = output_name.clone().unwrap_or_else(|| "HDMI-A-1".to_string());
+            get_output_size(&name).unwrap_or((1920, 1080))
+        };
 
         let niri_session = create_niri_session(&conn).await
             .map_err(|e| fdo::Error::Failed(format!("create session: {e}")))?;
@@ -242,11 +257,30 @@ async fn create_niri_session(conn: &Connection) -> anyhow::Result<String> {
 }
 
 async fn record_niri_source(
-    conn: &Connection, session_path: &str, monitor: &str,
-    _source_type: u32, cursor_mode: u32,
+    conn: &Connection, session_path: &str, output_name: &Option<String>,
+    source_type: u32, cursor_mode: u32,
 ) -> anyhow::Result<String> {
     let mut opts: HashMap<&str, OwnedValue> = HashMap::new();
     opts.insert("cursor_mode", OwnedValue::from(cursor_mode));
+
+    if source_type & 2 != 0 {
+        // Window capture
+        let window = niri_ipc::focused_window()
+            .map_err(|e| anyhow::anyhow!("get focused window: {e}"))?;
+        opts.insert("window-id", OwnedValue::from(window.id));
+        let msg = conn.call_method(Some(MUTTER_SCREENCAST_DEST), session_path,
+            Some("org.gnome.Mutter.ScreenCast.Session"), "RecordWindow",
+            &opts,
+        ).await?;
+        let body = msg.body();
+        let path: ObjectPath<'_> = body.deserialize()?;
+        let result = path.as_str().to_string();
+        drop(body);
+        return Ok(result);
+    }
+
+    // Monitor capture (default)
+    let monitor = output_name.as_deref().unwrap_or("HDMI-A-1");
     let msg = conn.call_method(Some(MUTTER_SCREENCAST_DEST), session_path,
         Some("org.gnome.Mutter.ScreenCast.Session"), "RecordMonitor",
         &(monitor, opts),
