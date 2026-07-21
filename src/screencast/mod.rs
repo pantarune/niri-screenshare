@@ -27,7 +27,9 @@ struct CaptureSession {
     niri_session_path: Option<String>,
     niri_stream_path: Option<String>,
     cursor_mode: u32,
+    source_type: u32,
     output_name: Option<String>,
+    window_id: Option<u64>,
     node_id: u32,
 }
 
@@ -74,7 +76,7 @@ impl ScreenCastInterface {
     #[zbus(property, name = "version")]
     fn version_prop(&self) -> u32 { 5 }
     #[zbus(property)]
-    fn available_source_types(&self) -> u32 { 1 }
+    fn available_source_types(&self) -> u32 { 3 }
     #[zbus(property)]
     fn available_cursor_modes(&self) -> u32 { 7 }
 
@@ -93,7 +95,9 @@ impl ScreenCastInterface {
             niri_stream_path: None,
 
             cursor_mode: 1,
+            source_type: 1,
             output_name: None,
+            window_id: None,
             node_id: 0,
         });
         if let Some(ref conn) = self.conn {
@@ -142,13 +146,33 @@ impl ScreenCastInterface {
         })?;
 
         session.cursor_mode = cursor_niri;
+        session.source_type = options.get("source_type").and_then(val_u32).unwrap_or(1);
 
         #[cfg(feature = "picker")]
         if std::env::var("NIRI_SCREENSHARE_PICKER").is_ok() {
-            if let Ok(outputs) = niri_ipc::list_outputs() {
-                session.output_name = pick::show_picker(&outputs);
+            let want_windows = session.source_type & 2 != 0;
+            let outputs = niri_ipc::list_outputs().ok().unwrap_or_default();
+            let windows = if want_windows {
+                niri_ipc::list_windows().ok().unwrap_or_default()
             } else {
-                session.output_name = None;
+                Vec::new()
+            };
+            match pick::show_picker(&outputs, &windows) {
+                Some(pick::PickerChoice::Monitor(name)) => {
+                    session.source_type = 1;
+                    session.output_name = Some(name);
+                    session.window_id = None;
+                }
+                Some(pick::PickerChoice::Window(id)) => {
+                    session.source_type = 2;
+                    session.output_name = None;
+                    session.window_id = Some(id);
+                }
+                None => {
+                    session.source_type = 1;
+                    session.output_name = niri_ipc::focused_output_name().ok();
+                    session.window_id = None;
+                }
             }
         } else {
             session.output_name = niri_ipc::focused_output_name().ok()
@@ -161,10 +185,11 @@ impl ScreenCastInterface {
                 .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
         }
 
-        tracing::info!("cursor={} output={:?}", cursor_niri, session.output_name);
+        tracing::info!("cursor={} source={} output={:?} window={:?}",
+            cursor_niri, session.source_type, session.output_name, session.window_id);
 
         let mut results = HashMap::new();
-        results.insert("available_source_types".into(), OwnedValue::from(1u32));
+        results.insert("available_source_types".into(), OwnedValue::from(3u32));
         results.insert("available_cursor_modes".into(), OwnedValue::from(7u32));
         Ok((0, results))
     }
@@ -180,7 +205,7 @@ impl ScreenCastInterface {
         tracing::info!("Start: session={}", session_handle);
         let conn = self.conn.clone().ok_or_else(|| fdo::Error::Failed("no D-Bus connection".into()))?;
 
-        let (output_name, cursor_mode) = {
+        let (source_type, output_name, window_id, cursor_mode) = {
             let mut s = self.state.lock().await;
             let session = s.get_mut(session_handle.as_str()).ok_or_else(|| {
                 fdo::Error::Failed(format!("session {} not found", session_handle))
@@ -189,16 +214,26 @@ impl ScreenCastInterface {
                 return Err(fdo::Error::Failed("session already started".into()));
             }
             session.started = true;
-            (session.output_name.clone(), session.cursor_mode)
+            (session.source_type, session.output_name.clone(), session.window_id, session.cursor_mode)
         };
-
-        let name = output_name.as_deref().unwrap_or("HDMI-A-1");
-        let (width, height) = get_output_size(name).unwrap_or((1920, 1080));
 
         let niri_session = create_niri_session(&conn).await
             .map_err(|e| fdo::Error::Failed(format!("create session: {e}")))?;
-        let niri_stream = record_niri_monitor(&conn, &niri_session, name, cursor_mode).await
-            .map_err(|e| fdo::Error::Failed(format!("record: {e}")))?;
+
+        let (niri_stream, width, height) = if source_type == 2 {
+            let wid = window_id.ok_or_else(|| fdo::Error::Failed("no window id".into()))?;
+            let stream = record_niri_window(&conn, &niri_session, wid, cursor_mode).await
+                .map_err(|e| fdo::Error::Failed(format!("record window: {e}")))?;
+            let size = get_window_size(wid).unwrap_or((960, 1048));
+            (stream, size.0, size.1)
+        } else {
+            let name = output_name.as_deref().unwrap_or("HDMI-A-1");
+            let stream = record_niri_monitor(&conn, &niri_session, name, cursor_mode).await
+                .map_err(|e| fdo::Error::Failed(format!("record monitor: {e}")))?;
+            let size = get_output_size(name).unwrap_or((1920, 1080));
+            (stream, size.0, size.1)
+        };
+
         let node_id = start_and_get_node_id(&conn, &niri_session, &niri_stream).await
             .map_err(|e| fdo::Error::Failed(format!("start: {e}")))?;
 
@@ -211,7 +246,7 @@ impl ScreenCastInterface {
             }
         }
 
-        tracing::info!("node={} size={}x{}", node_id, width, height);
+        tracing::info!("node={} size={}x{} type={}", node_id, width, height, source_type);
 
         let mut results = HashMap::new();
         let mut sp: HashMap<String, Value<'_>> = HashMap::new();
@@ -279,6 +314,24 @@ async fn record_niri_monitor(
     Ok(result)
 }
 
+async fn record_niri_window(
+    conn: &Connection, session_path: &str, window_id: u64,
+    cursor_mode: u32,
+) -> anyhow::Result<String> {
+    let mut opts: HashMap<&str, OwnedValue> = HashMap::new();
+    opts.insert("cursor-mode", OwnedValue::from(cursor_mode));
+    opts.insert("window-id", OwnedValue::from(window_id));
+    let msg = conn.call_method(Some(MUTTER_SCREENCAST_DEST), session_path,
+        Some("org.gnome.Mutter.ScreenCast.Session"), "RecordWindow",
+        &opts,
+    ).await?;
+    let body = msg.body();
+    let path: ObjectPath<'_> = body.deserialize()?;
+    let result = path.as_str().to_string();
+    drop(body);
+    Ok(result)
+}
+
 async fn start_and_get_node_id(conn: &Connection, session_path: &str, stream_path: &str) -> anyhow::Result<u32> {
     use zbus::proxy::Proxy;
 
@@ -303,6 +356,17 @@ async fn start_and_get_node_id(conn: &Connection, session_path: &str, stream_pat
         Ok(None) => anyhow::bail!("signal stream ended"),
         Err(_) => anyhow::bail!("timeout waiting for pipewire node"),
     }
+}
+
+fn get_window_size(window_id: u64) -> Option<(u32, u32)> {
+    if let Ok(windows) = niri_ipc::list_windows() {
+        for w in &windows {
+            if w.id == window_id {
+                return Some((w.size.width as u32, w.size.height as u32));
+            }
+        }
+    }
+    None
 }
 
 fn get_output_size(output_name: &str) -> Option<(u32, u32)> {
