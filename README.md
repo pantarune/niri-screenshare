@@ -1,15 +1,10 @@
 # niri-screenshare
 
-portal backend for niri, implements ScreenCast.
+portal backend for niri. replaces `xdg-desktop-portal-gnome` for screen sharing.
 
-## vs xdg-desktop-portal-gnome
+## why
 
-| | gnome | niri-screenshare |
-|---|---|---|
-| depends | gnome-shell, libadwaita, tracker, nautilus, evolution-data-server, gvfs | nothing |
-| language | 17k+ lines C | 450 lines Rust |
-| binary | 640KB + gnome runtime | 1.5MB static |
-| selector | libadwaita dialog | none (auto-selects) |
+niri's wiki tells you to install `xdg-desktop-portal-gnome` for screencasting. it works but pulls in half of gnome. this does the same thing without the bloat.
 
 both call `org.gnome.Mutter.ScreenCast` on niri either way.
 
@@ -19,7 +14,7 @@ both call `org.gnome.Mutter.ScreenCast` on niri either way.
 paru -S niri-screenshare
 ```
 
-or build manually:
+or manually:
 
 ```
 cargo build --release
@@ -33,11 +28,18 @@ systemctl --user enable --now xdg-desktop-portal-niri.service
 
 ## config
 
-```
+the portal daemon (`xdg-desktop-portal`) chooses which backend to use for each interface based on `~/.config/xdg-desktop-portal/portals.conf`:
+
+```ini
 [preferred]
 default=gtk
 org.freedesktop.impl.portal.ScreenCast=niri
 ```
+
+without this, the portal daemon would fall back to `UseIn=gnome` matching (which loads the gnome portal). this tells it to use our backend instead.
+
+- `default=gtk` — routes stuff like file picker to the lightweight gtk portal instead of gnome's (avoids pulling nautilus)
+- `ScreenCast=niri` — routes screen sharing to this backend
 
 ## depends
 
@@ -45,4 +47,4 @@ org.freedesktop.impl.portal.ScreenCast=niri
 
 ## how
 
-app → portal → our backend → niri's Mutter.ScreenCast → PipeWire node. zero frame copying, niri handles the gpu capture.
+app → portal daemon → our backend → niri's Mutter.ScreenCast → PipeWire. niri handles the gpu capture, we just relay the pipewire node id.
