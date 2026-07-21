@@ -125,19 +125,27 @@ impl ScreenCastInterface {
                 _ => None,
             }
         }
-        let types = options.get("types").and_then(val_u32).unwrap_or(1);
-        let cursor = options.get("cursor_mode").and_then(val_u32).unwrap_or(1);
+
+        // Map portal cursor_mode to niri's values:
+        // portal: 1=Hidden, 2=Embedded, 4=Metadata
+        // niri:   0=Hidden, 1=Embedded, 2=Metadata
+        let cursor_portal = options.get("cursor_mode").and_then(val_u32);
+        let cursor_niri = match cursor_portal {
+            Some(2) => 1, // portal Embedded → niri Embedded
+            Some(4) => 2, // portal Metadata → niri Metadata
+            _ => 1,       // default: Embedded
+        };
 
         let mut state = self.state.lock().await;
         let session = state.get_mut(session_handle.as_str()).ok_or_else(|| {
             fdo::Error::Failed(format!("session {} not found", session_handle))
         })?;
 
-        session.cursor_mode = cursor;
+        session.cursor_mode = cursor_niri;
         session.output_name = niri_ipc::focused_output_name().ok()
             .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
 
-        tracing::info!("types={} cursor={} output={:?}", types, cursor, session.output_name);
+        tracing::info!("cursor={} output={:?}", cursor_niri, session.output_name);
 
         let mut results = HashMap::new();
         results.insert("available_source_types".into(), OwnedValue::from(1u32));
