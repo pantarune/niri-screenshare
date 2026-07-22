@@ -150,13 +150,8 @@ impl ScreenCastInterface {
 
         #[cfg(feature = "picker")]
         if std::env::var("NIRI_SCREENSHARE_PICKER").is_ok() {
-            let want_windows = session.source_type & 2 != 0;
             let outputs = niri_ipc::list_outputs().ok().unwrap_or_default();
-            let windows = if want_windows {
-                niri_ipc::list_windows().ok().unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            let windows = niri_ipc::list_windows().ok().unwrap_or_default();
             match pick::show_picker(&outputs, &windows) {
                 Some(pick::PickerChoice::Monitor(name)) => {
                     session.source_type = 1;
