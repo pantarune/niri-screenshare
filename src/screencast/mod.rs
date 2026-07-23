@@ -163,13 +163,9 @@ impl ScreenCastInterface {
                     session.output_name = None;
                     session.window_id = Some(id);
                 }
-                None if session.source_type & 2 != 0 => {
-                    return Err(fdo::Error::Failed("user cancelled selection".into()));
-                }
                 None => {
-                    session.source_type = 1;
-                    session.output_name = niri_ipc::focused_output_name().ok();
-                    session.window_id = None;
+                    tracing::info!("SelectSources: user cancelled");
+                    return Ok((1, HashMap::new()));
                 }
             }
         } else {
