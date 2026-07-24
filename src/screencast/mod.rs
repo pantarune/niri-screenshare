@@ -260,7 +260,7 @@ impl ScreenCastInterface {
         session.source_type = options.get("source_type").and_then(val_u32).unwrap_or(1);
 
         #[cfg(feature = "picker")]
-        if std::env::var("NIRI_SCREENSHARE_PICKER").is_ok() {
+        if std::env::var("NIRI_SCREENSHARE_NO_PICKER").is_err() {
             let session_id = session_handle.to_string();
             let app_id = app_id.to_string();
 

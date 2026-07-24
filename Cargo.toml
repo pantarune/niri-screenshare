@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["picker"]
 picker = ["dep:gtk4", "dep:libadwaita"]
 
 [dependencies]
