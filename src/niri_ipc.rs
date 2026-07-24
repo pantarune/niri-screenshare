@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 pub struct Size {
@@ -10,8 +11,27 @@ pub struct NiriOutput {
     pub logical: Size,
 }
 
+fn niri_command() -> Command {
+    Command::new(niri_bin())
+}
+
+/// Resolve `niri` when PATH is minimal (systemd user services).
+pub fn niri_bin() -> &'static str {
+    const CANDIDATES: &[&str] = &[
+        "/run/current-system/sw/bin/niri",
+        "/usr/bin/niri",
+        "niri",
+    ];
+    for candidate in CANDIDATES {
+        if *candidate == "niri" || Path::new(candidate).is_file() {
+            return candidate;
+        }
+    }
+    "niri"
+}
+
 pub fn list_outputs() -> anyhow::Result<Vec<NiriOutput>> {
-    let out = Command::new("niri")
+    let out = niri_command()
         .args(["msg", "--json", "outputs"])
         .output()?;
     if !out.status.success() {
@@ -30,7 +50,7 @@ pub struct NiriWindow {
 }
 
 pub fn list_windows() -> anyhow::Result<Vec<NiriWindow>> {
-    let out = Command::new("niri")
+    let out = niri_command()
         .args(["msg", "--json", "windows"])
         .output()?;
     if !out.status.success() {
@@ -41,7 +61,7 @@ pub fn list_windows() -> anyhow::Result<Vec<NiriWindow>> {
 }
 
 pub fn focused_output_name() -> anyhow::Result<String> {
-    let out = Command::new("niri")
+    let out = niri_command()
         .args(["msg", "--json", "focused-output"])
         .output()?;
     if !out.status.success() {

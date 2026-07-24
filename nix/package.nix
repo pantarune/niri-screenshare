@@ -1,8 +1,10 @@
 {
   lib,
   rustPlatform,
-  makeWrapper,
-  zenity,
+  pkg-config,
+  wrapGAppsHook4,
+  gtk4,
+  libadwaita,
   withPicker ? true,
 }:
 
@@ -24,13 +26,19 @@ rustPlatform.buildRustPackage {
 
   buildFeatures = lib.optional withPicker "picker";
 
-  nativeBuildInputs = lib.optionals withPicker [ makeWrapper ];
+  nativeBuildInputs = lib.optionals withPicker [
+    pkg-config
+    wrapGAppsHook4
+  ];
 
+  buildInputs = lib.optionals withPicker [
+    gtk4
+    libadwaita
+  ];
+
+  # Start the GApps-wrapped $out/bin binary (schemas via XDG_DATA_DIRS).
   postInstall = ''
-    mkdir -p $out/lib $out/bin $out/share/dbus-1/services $out/lib/systemd/user
-
-    mv $out/bin/niri-screenshare $out/lib/niri-screenshare
-    ln -sf $out/lib/niri-screenshare $out/bin/niri-screenshare
+    mkdir -p $out/share/dbus-1/services $out/lib/systemd/user
 
     install -Dm644 data/niri.portal \
       $out/share/xdg-desktop-portal/portals/niri.portal
@@ -40,15 +48,11 @@ rustPlatform.buildRustPackage {
 
     substitute data/org.freedesktop.impl.portal.desktop.niri.service \
       $out/share/dbus-1/services/org.freedesktop.impl.portal.desktop.niri.service \
-      --replace-fail /usr/lib/niri-screenshare "$out/lib/niri-screenshare"
+      --replace-fail /usr/lib/niri-screenshare "$out/bin/niri-screenshare"
 
     substitute data/niri-screenshare.service \
       $out/lib/systemd/user/niri-screenshare.service \
-      --replace-fail /usr/lib/niri-screenshare "$out/lib/niri-screenshare"
-  ''
-  + lib.optionalString withPicker ''
-    wrapProgram $out/lib/niri-screenshare \
-      --prefix PATH : ${lib.makeBinPath [ zenity ]}
+      --replace-fail /usr/lib/niri-screenshare "$out/bin/niri-screenshare"
   '';
 
   meta = {
