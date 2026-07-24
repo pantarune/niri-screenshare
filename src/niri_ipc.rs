@@ -16,18 +16,20 @@ fn niri_command() -> Command {
 }
 
 /// Resolve `niri` when PATH is minimal (systemd user services).
-pub fn niri_bin() -> &'static str {
+pub fn niri_bin() -> String {
+    if let Ok(path) = std::env::var("NIRI_BIN") {
+        return path;
+    }
     const CANDIDATES: &[&str] = &[
         "/run/current-system/sw/bin/niri",
         "/usr/bin/niri",
-        "niri",
     ];
     for candidate in CANDIDATES {
-        if *candidate == "niri" || Path::new(candidate).is_file() {
-            return candidate;
+        if Path::new(candidate).is_file() {
+            return candidate.to_string();
         }
     }
-    "niri"
+    "niri".to_string()
 }
 
 pub fn list_outputs() -> anyhow::Result<Vec<NiriOutput>> {

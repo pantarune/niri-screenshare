@@ -587,13 +587,13 @@ fn try_float_picker_window() -> bool {
     };
     let id = w.id.to_string();
     let niri = crate::niri_ipc::niri_bin();
-    let _ = Command::new(niri)
+    let _ = Command::new(&niri)
         .args(["msg", "action", "focus-window", "--id", &id])
         .output();
-    let _ = Command::new(niri)
+    let _ = Command::new(&niri)
         .args(["msg", "action", "move-window-to-floating", "--id", &id])
         .output();
-    let _ = Command::new(niri)
+    let _ = Command::new(&niri)
         .args(["msg", "action", "center-window", "--id", &id])
         .output();
     true
