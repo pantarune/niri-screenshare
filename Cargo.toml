@@ -2,6 +2,12 @@
 name = "niri-screenshare"
 version = "0.1.0"
 edition = "2021"
+description = "Portal backend implementing ScreenCast for niri"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/pantarune/niri-screenshare"
+homepage = "https://github.com/pantarune/niri-screenshare"
+keywords = ["niri", "portal", "screencast", "pipewire", "wayland"]
+categories = ["multimedia::video", "os::linux-apis"]
 
 [features]
 default = ["picker"]

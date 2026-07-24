@@ -4,7 +4,7 @@ mod pw_backend;
 
 #[cfg(feature = "picker")]
 pub use pick::{
-    run_picker_process, show_picker as debug_show_picker, PickerChoice as DebugPickerChoice,
+    run_picker_process, PickerChoice as DebugPickerChoice,
 };
 
 use std::collections::HashMap;

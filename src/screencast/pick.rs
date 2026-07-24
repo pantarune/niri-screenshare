@@ -14,6 +14,7 @@ use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, Label, ListBox, Orientation,
     PolicyType, ScrolledWindow, SelectionMode, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
+#[allow(unused_imports)]
 use libadwaita::prelude::*;
 use libadwaita::{ActionRow, HeaderBar, ViewStack, ViewSwitcher, ViewSwitcherPolicy};
 
@@ -45,11 +46,6 @@ struct WindowItem {
 
 /// Holds the picker child so Session.Close can kill it on cancel/retry.
 pub type PickerChildSlot = Arc<std::sync::Mutex<Option<std::process::Child>>>;
-
-/// Spawn `--picker` in a child process (GTK needs its own Application).
-pub fn show_picker(outputs: &[NiriOutput], windows: &[NiriWindow]) -> Option<PickerChoice> {
-    show_picker_cancellable(outputs, windows, None)
-}
 
 pub fn show_picker_cancellable(
     outputs: &[NiriOutput],
