@@ -616,3 +616,35 @@ impl From<&NiriWindow> for WindowItem {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_roundtrip_plain() {
+        assert_eq!(unescape_field(&escape_field("hello")), "hello");
+    }
+
+    #[test]
+    fn escape_roundtrip_special_chars() {
+        let original = "tab\there\nnewline\\backslash";
+        assert_eq!(unescape_field(&escape_field(original)), original);
+    }
+
+    #[test]
+    fn escape_produces_tab_safe_output() {
+        let escaped = escape_field("a\tb");
+        assert!(!escaped.contains('\t'));
+    }
+
+    #[test]
+    fn unescape_handles_trailing_backslash() {
+        assert_eq!(unescape_field("end\\"), "end\\");
+    }
+
+    #[test]
+    fn unescape_handles_unknown_escape() {
+        assert_eq!(unescape_field("a\\xb"), "a\\xb");
+    }
+}

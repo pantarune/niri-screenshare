@@ -143,3 +143,71 @@ pub fn running_on_niri() -> bool {
         .and_then(|o| if o.status.success() { Some(()) } else { None })
         .is_some()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_outputs_basic() {
+        let raw = r#"{
+            "HDMI-A-1": {"name": "HDMI-A-1", "logical": {"width": 1920, "height": 1080}},
+            "DP-1": {"logical": {"width": 2560, "height": 1440}}
+        }"#;
+        let outputs = parse_outputs(raw).unwrap();
+        assert_eq!(outputs.len(), 2);
+        let hdmi = outputs.iter().find(|o| o.name == "HDMI-A-1").unwrap();
+        assert_eq!(hdmi.logical.width, 1920);
+        // falls back to map key when name field is absent
+        let dp = outputs.iter().find(|o| o.name == "DP-1").unwrap();
+        assert_eq!(dp.logical.height, 1440);
+    }
+
+    #[test]
+    fn parse_outputs_skips_entries_without_logical() {
+        let raw = r#"{"HDMI-A-1": {"name": "HDMI-A-1"}}"#;
+        assert!(parse_outputs(raw).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_outputs_rejects_invalid_json() {
+        assert!(parse_outputs("not json").is_err());
+    }
+
+    #[test]
+    fn parse_windows_basic() {
+        let raw = r#"[{
+            "id": 42,
+            "title": "Firefox",
+            "app_id": "firefox",
+            "layout": {"window_size": [1280, 720]}
+        }]"#;
+        let windows = parse_windows(raw).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id, 42);
+        assert_eq!(windows[0].title, "Firefox");
+        assert_eq!(windows[0].size.width, 1280);
+        assert_eq!(windows[0].size.height, 720);
+    }
+
+    #[test]
+    fn parse_windows_defaults_empty_title_and_app() {
+        let raw = r#"[{"id": 7, "layout": {"window_size": [800, 600]}}]"#;
+        let windows = parse_windows(raw).unwrap();
+        assert_eq!(windows[0].title, "");
+        assert_eq!(windows[0].app_id, "");
+    }
+
+    #[test]
+    fn parse_windows_skips_without_layout() {
+        let raw = r#"[{"id": 7, "title": "no layout"}]"#;
+        assert!(parse_windows(raw).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_windows_handles_escapes_in_title() {
+        let raw = r#"[{"id": 1, "title": "a \"quoted\" name", "layout": {"window_size": [100, 100]}}]"#;
+        let windows = parse_windows(raw).unwrap();
+        assert_eq!(windows[0].title, "a \"quoted\" name");
+    }
+}
