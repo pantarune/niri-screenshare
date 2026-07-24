@@ -10,6 +10,7 @@ pub use pick::{
 use std::collections::HashMap;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
+#[cfg(feature = "picker")]
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -109,12 +110,6 @@ impl PickerCoordinator {
         }
     }
 
-    fn clear_recent(&self) {
-        if let Ok(mut guard) = self.recent.lock() {
-            *guard = None;
-        }
-    }
-
     fn begin_picking(&self, session_id: &str) {
         if let Ok(mut guard) = self.picking_session.lock() {
             *guard = Some(session_id.to_string());
@@ -187,8 +182,7 @@ impl ScreenCastInterface {
     fn available_source_types(&self) -> u32 { 3 }
     #[zbus(property)]
     fn available_cursor_modes(&self) -> u32 {
-        // Hidden | Embedded. Skip Metadata, Electron often blacks out with it.
-        1 | 2
+        1 | 2 | 4
     }
 
     async fn create_session(
@@ -213,13 +207,17 @@ impl ScreenCastInterface {
         });
         if let Some(ref conn) = self.conn {
             if let Ok(p) = ObjectPath::try_from(sh.as_str()) {
-                let _ = conn.object_server().at(p, SessionHandler {
+                match conn.object_server().at(p, SessionHandler {
                     state: self.state.clone(),
                     session_id: sh.clone(),
                     conn: self.conn.clone(),
                     #[cfg(feature = "picker")]
                     picker: self.picker.clone(),
-                }).await;
+                }).await {
+                    Ok(true) => {},
+                    Ok(false) => tracing::warn!("session path already registered: {sh}"),
+                    Err(e) => tracing::warn!("failed to register session handler: {e}"),
+                }
             }
         }
         Ok((0, HashMap::new()))
@@ -229,7 +227,7 @@ impl ScreenCastInterface {
         &mut self,
         _request_handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
-        app_id: &str,
+        #[allow(unused_variables)] app_id: &str,
         options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
         tracing::info!("SelectSources: session={}", session_handle);
@@ -245,9 +243,10 @@ impl ScreenCastInterface {
 
         // portal: 1=Hidden 2=Embedded 4=Metadata; niri: 0=Hidden 1=Embedded 2=Metadata
         let cursor_portal = options.get("cursor_mode").and_then(val_u32);
-        // Prefer Embedded. Metadata often yields a black frame in Electron.
         let cursor_niri = match cursor_portal {
             Some(1) => 0,
+            Some(2) => 1,
+            Some(4) => 2,
             _ => 1,
         };
 
@@ -314,8 +313,6 @@ impl ScreenCastInterface {
                     apply_picker_choice(session, choice);
                 }
                 None => {
-                    // response 1 = user cancelled
-                    self.picker.clear_recent();
                     tracing::info!("SelectSources: user cancelled");
                     return Ok((1, HashMap::new()));
                 }
@@ -366,14 +363,20 @@ impl ScreenCastInterface {
             let wid = window_id.ok_or_else(|| fdo::Error::Failed("no window id".into()))?;
             let stream = record_niri_window(&conn, &niri_session, wid, cursor_mode).await
                 .map_err(|e| fdo::Error::Failed(format!("record window: {e}")))?;
-            let size = get_window_size(wid).unwrap_or((960, 1048));
+            let size = get_window_size(wid).unwrap_or_else(|| {
+                tracing::warn!("window {wid} size lookup failed, using dummy size");
+                (960, 1048)
+            });
             (stream, size.0, size.1)
         } else {
             let name = output_name.as_deref()
                 .ok_or_else(|| fdo::Error::Failed("no output selected".into()))?;
             let stream = record_niri_monitor(&conn, &niri_session, name, cursor_mode).await
                 .map_err(|e| fdo::Error::Failed(format!("record monitor: {e}")))?;
-            let size = get_output_size(name).unwrap_or((1920, 1080));
+            let size = get_output_size(name).unwrap_or_else(|| {
+                tracing::warn!("size lookup failed for output {name:?}, using dummy size");
+                (1920, 1080)
+            });
             (stream, size.0, size.1)
         };
 
@@ -409,8 +412,18 @@ impl ScreenCastInterface {
         _options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<ZvariantFd<'static>> {
         tracing::info!("OpenPipeWireRemote: session={}", session_handle);
-        let raw = pw_backend::open_fd()
-            .map_err(|e| fdo::Error::Failed(format!("open pipewire socket: {e}")))?;
+        {
+            let state = self.state.lock().await;
+            if !state.contains_key(session_handle.as_str()) {
+                return Err(fdo::Error::Failed("unknown session".into()));
+            }
+        }
+        let raw = tokio::task::spawn_blocking(|| {
+            pw_backend::open_fd()
+        })
+        .await
+        .map_err(|e| fdo::Error::Failed(format!("join error: {e}")))?
+        .map_err(|e| fdo::Error::Failed(format!("open pipewire socket: {e}")))?;
         Ok(ZvariantFd::Owned(unsafe { OwnedFd::from_raw_fd(raw) }))
     }
 
@@ -432,7 +445,7 @@ impl ScreenCastInterface {
 fn select_sources_results() -> HashMap<String, OwnedValue> {
     let mut results = HashMap::new();
     results.insert("available_source_types".into(), OwnedValue::from(3u32));
-    results.insert("available_cursor_modes".into(), OwnedValue::from(3u32));
+    results.insert("available_cursor_modes".into(), OwnedValue::from(7u32));
     results
 }
 

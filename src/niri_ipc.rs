@@ -136,8 +136,31 @@ fn extract_json_string(raw: &str, key: &str) -> Option<String> {
     let after_key = &raw[idx + search.len()..];
     let colon = after_key.find(':')?;
     let after_colon = after_key[colon + 1..].trim().strip_prefix('"')?;
-    let end = after_colon.find('"')?;
-    Some(after_colon[..end].to_string())
+    let mut out = String::new();
+    let mut chars = after_colon.chars();
+    loop {
+        match chars.next()? {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Some(c) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(c);
+                    }
+                }
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            },
+            c => out.push(c),
+        }
+    }
 }
 
 fn extract_json_int(raw: &str, key: &str) -> Option<i32> {

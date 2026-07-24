@@ -13,6 +13,9 @@ paru -S niri-screenshare
 
 ### other
 
+requires `gtk4` and `libadwaita` system packages (for the default picker build).
+build without them via `cargo build --release --no-default-features`.
+
 ```
 git clone https://github.com/pantarune/niri-screenshare
 cd niri-screenshare
@@ -84,6 +87,19 @@ app → xdg-desktop-portal → niri-screenshare → Mutter.ScreenCast → PipeWi
 
 - **runtime:** `xdg-desktop-portal`, `pipewire`, `niri`, `gtk4`, `libadwaita`
 - **build:** `cargo`, `gtk4`, `libadwaita`
+
+## troubleshooting
+
+**picker doesn't appear** — make sure you built with default features (`cargo build --release`)
+and the service has `NIRI_SCREENSHARE_NO_PICKER` unset. check the service log:
+`journalctl --user -u niri-screenshare -n 20`
+
+**obs/discord shows "no capture sources"** — verify the portal backend is registered:
+`busctl list | grep niri`. if nothing shows, restart the service:
+`systemctl --user restart niri-screenshare`
+
+**portal daemon crashes on screenshare** — some `xdg-desktop-portal` 1.22.1 builds
+have a bug in session initialization. upgrading or reinstalling usually fixes it.
 
 ## credits
 
