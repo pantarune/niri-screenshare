@@ -6,7 +6,9 @@
   clippy,
   rust-analyzer,
   rustPlatform,
-  zenity,
+  pkg-config,
+  gtk4,
+  libadwaita,
   nixfmt,
   niri-screenshare,
 }:
@@ -20,7 +22,9 @@ mkShell {
     rustfmt
     clippy
     rust-analyzer
-    zenity
+    pkg-config
+    gtk4
+    libadwaita
     nixfmt
   ];
 

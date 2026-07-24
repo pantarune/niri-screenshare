@@ -5,15 +5,17 @@ edition = "2021"
 
 [features]
 default = []
-picker = []
+picker = ["dep:gtk4", "dep:libadwaita"]
 
 [dependencies]
 zbus = { version = "5", features = ["tokio"] }
-tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "rt-multi-thread"] }
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1"
+gtk4 = { version = "0.9", optional = true }
+libadwaita = { version = "0.7", optional = true }
 
 [profile.release]
 opt-level = "z"

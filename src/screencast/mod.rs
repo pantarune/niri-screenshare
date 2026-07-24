@@ -2,9 +2,15 @@
 mod pick;
 mod pw_backend;
 
+#[cfg(feature = "picker")]
+pub use pick::{
+    run_picker_process, show_picker as debug_show_picker, PickerChoice as DebugPickerChoice,
+};
+
 use std::collections::HashMap;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use zbus::fdo;
@@ -17,9 +23,15 @@ use crate::niri_ipc;
 const MUTTER_SCREENCAST_DEST: &str = "org.gnome.Mutter.ScreenCast";
 const MUTTER_SCREENCAST_PATH: &str = "/org/gnome/Mutter/ScreenCast";
 
+/// How long to reuse a picker choice across client session retries.
+#[cfg(feature = "picker")]
+const PICKER_REUSE_TTL: Duration = Duration::from_secs(10);
+
 pub struct ScreenCastInterface {
     state: Arc<Mutex<HashMap<String, CaptureSession>>>,
     conn: Option<Connection>,
+    #[cfg(feature = "picker")]
+    picker: Arc<PickerCoordinator>,
 }
 
 struct CaptureSession {
@@ -37,6 +49,98 @@ struct SessionHandler {
     state: Arc<Mutex<HashMap<String, CaptureSession>>>,
     session_id: String,
     conn: Option<Connection>,
+    #[cfg(feature = "picker")]
+    picker: Arc<PickerCoordinator>,
+}
+
+/// In-flight picker child plus a short-lived selection cache for retrying clients.
+#[cfg(feature = "picker")]
+struct PickerCoordinator {
+    child: pick::PickerChildSlot,
+    picking_session: std::sync::Mutex<Option<String>>,
+    recent: std::sync::Mutex<Option<RecentPickerChoice>>,
+}
+
+#[cfg(feature = "picker")]
+struct RecentPickerChoice {
+    at: Instant,
+    app_id: String,
+    choice: pick::PickerChoice,
+}
+
+#[cfg(feature = "picker")]
+impl PickerCoordinator {
+    fn new() -> Self {
+        Self {
+            child: Arc::new(std::sync::Mutex::new(None)),
+            picking_session: std::sync::Mutex::new(None),
+            recent: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn take_reusable(&self, app_id: &str) -> Option<pick::PickerChoice> {
+        let guard = self.recent.lock().ok()?;
+        let recent = guard.as_ref()?;
+        if recent.at.elapsed() > PICKER_REUSE_TTL {
+            return None;
+        }
+        // Empty app_id on either side still matches.
+        if !recent.app_id.is_empty()
+            && !app_id.is_empty()
+            && recent.app_id != app_id
+        {
+            return None;
+        }
+        tracing::info!(
+            "reusing picker choice from {}s ago (app_id={:?})",
+            recent.at.elapsed().as_secs(),
+            app_id
+        );
+        Some(recent.choice.clone())
+    }
+
+    fn remember(&self, app_id: &str, choice: pick::PickerChoice) {
+        if let Ok(mut guard) = self.recent.lock() {
+            *guard = Some(RecentPickerChoice {
+                at: Instant::now(),
+                app_id: app_id.to_string(),
+                choice,
+            });
+        }
+    }
+
+    fn clear_recent(&self) {
+        if let Ok(mut guard) = self.recent.lock() {
+            *guard = None;
+        }
+    }
+
+    fn begin_picking(&self, session_id: &str) {
+        if let Ok(mut guard) = self.picking_session.lock() {
+            *guard = Some(session_id.to_string());
+        }
+    }
+
+    fn end_picking(&self, session_id: &str) {
+        if let Ok(mut guard) = self.picking_session.lock() {
+            if guard.as_deref() == Some(session_id) {
+                *guard = None;
+            }
+        }
+    }
+
+    fn cancel_if_picking(&self, session_id: &str) {
+        let ours = self
+            .picking_session
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some_and(|s| s == session_id);
+        if ours {
+            pick::kill_slotted_picker(&self.child);
+            self.end_picking(session_id);
+        }
+    }
 }
 
 impl ScreenCastInterface {
@@ -44,6 +148,8 @@ impl ScreenCastInterface {
         Self {
             state: Arc::new(Mutex::new(HashMap::new())),
             conn: Some(conn),
+            #[cfg(feature = "picker")]
+            picker: Arc::new(PickerCoordinator::new()),
         }
     }
 }
@@ -52,6 +158,8 @@ impl ScreenCastInterface {
 impl SessionHandler {
     async fn close(&mut self) -> fdo::Result<()> {
         tracing::info!("Session.Close: session={}", self.session_id);
+        #[cfg(feature = "picker")]
+        self.picker.cancel_if_picking(&self.session_id);
         let mut state = self.state.lock().await;
         if let Some(session) = state.remove(&self.session_id) {
             Self::stop_niri(&self.conn, &session.niri_session_path).await;
@@ -78,7 +186,10 @@ impl ScreenCastInterface {
     #[zbus(property)]
     fn available_source_types(&self) -> u32 { 3 }
     #[zbus(property)]
-    fn available_cursor_modes(&self) -> u32 { 7 }
+    fn available_cursor_modes(&self) -> u32 {
+        // Hidden | Embedded. Skip Metadata, Electron often blacks out with it.
+        1 | 2
+    }
 
     async fn create_session(
         &mut self,
@@ -106,6 +217,8 @@ impl ScreenCastInterface {
                     state: self.state.clone(),
                     session_id: sh.clone(),
                     conn: self.conn.clone(),
+                    #[cfg(feature = "picker")]
+                    picker: self.picker.clone(),
                 }).await;
             }
         }
@@ -116,7 +229,7 @@ impl ScreenCastInterface {
         &mut self,
         _request_handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
-        _app_id: &str,
+        app_id: &str,
         options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
         tracing::info!("SelectSources: session={}", session_handle);
@@ -130,14 +243,12 @@ impl ScreenCastInterface {
             }
         }
 
-        // Map portal cursor_mode to niri's values:
-        // portal: 1=Hidden, 2=Embedded, 4=Metadata
-        // niri:   0=Hidden, 1=Embedded, 2=Metadata
+        // portal: 1=Hidden 2=Embedded 4=Metadata; niri: 0=Hidden 1=Embedded 2=Metadata
         let cursor_portal = options.get("cursor_mode").and_then(val_u32);
+        // Prefer Embedded. Metadata often yields a black frame in Electron.
         let cursor_niri = match cursor_portal {
-            Some(2) => 1, // portal Embedded → niri Embedded
-            Some(4) => 2, // portal Metadata → niri Metadata
-            _ => 1,       // default: Embedded
+            Some(1) => 0,
+            _ => 1,
         };
 
         let mut state = self.state.lock().await;
@@ -150,42 +261,79 @@ impl ScreenCastInterface {
 
         #[cfg(feature = "picker")]
         if std::env::var("NIRI_SCREENSHARE_PICKER").is_ok() {
-            let outputs = niri_ipc::list_outputs().ok().unwrap_or_default();
-            let windows = niri_ipc::list_windows().ok().unwrap_or_default();
-            match pick::show_picker(&outputs, &windows) {
-                Some(pick::PickerChoice::Monitor(name)) => {
-                    session.source_type = 1;
-                    session.output_name = Some(name);
-                    session.window_id = None;
+            let session_id = session_handle.to_string();
+            let app_id = app_id.to_string();
+
+            // Reuse a recent choice so retrying clients only see one dialog.
+            let reused = self.picker.take_reusable(&app_id);
+            if let Some(choice) = reused {
+                apply_picker_choice(session, choice);
+                drop(state);
+                return Ok((0, select_sources_results()));
+            }
+
+            drop(state);
+
+            let outputs = match niri_ipc::list_outputs() {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::error!("list_outputs failed: {e}");
+                    Vec::new()
                 }
-                Some(pick::PickerChoice::Window(id)) => {
-                    session.source_type = 2;
-                    session.output_name = None;
-                    session.window_id = Some(id);
+            };
+            let windows = match niri_ipc::list_windows() {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::error!("list_windows failed: {e}");
+                    Vec::new()
+                }
+            };
+            tracing::info!(
+                "picker targets: {} display(s), {} window(s)",
+                outputs.len(),
+                windows.len()
+            );
+
+            self.picker.begin_picking(&session_id);
+            let child_slot = self.picker.child.clone();
+            let choice = tokio::task::spawn_blocking(move || {
+                pick::show_picker_cancellable(&outputs, &windows, Some(child_slot))
+            })
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("picker task failed: {e}")))?;
+            self.picker.end_picking(&session_id);
+
+            let mut state = self.state.lock().await;
+            let session = state.get_mut(session_handle.as_str()).ok_or_else(|| {
+                fdo::Error::Failed(format!("session {} not found", session_handle))
+            })?;
+
+            match choice {
+                Some(choice) => {
+                    self.picker.remember(&app_id, choice.clone());
+                    apply_picker_choice(session, choice);
                 }
                 None => {
+                    // response 1 = user cancelled
+                    self.picker.clear_recent();
                     tracing::info!("SelectSources: user cancelled");
                     return Ok((1, HashMap::new()));
                 }
             }
-        } else {
-            session.output_name = niri_ipc::focused_output_name().ok()
-                .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
+
+            tracing::info!("cursor={} source={} output={:?} window={:?}",
+                cursor_niri, session.source_type, session.output_name, session.window_id);
+
+            return Ok((0, select_sources_results()));
         }
 
-        #[cfg(not(feature = "picker"))]
-        {
-            session.output_name = niri_ipc::focused_output_name().ok()
-                .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
-        }
+        session.output_name = niri_ipc::focused_output_name().ok()
+            .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
 
         tracing::info!("cursor={} source={} output={:?} window={:?}",
             cursor_niri, session.source_type, session.output_name, session.window_id);
 
-        let mut results = HashMap::new();
-        results.insert("available_source_types".into(), OwnedValue::from(3u32));
-        results.insert("available_cursor_modes".into(), OwnedValue::from(7u32));
-        Ok((0, results))
+        Ok((0, select_sources_results()))
     }
 
     async fn start(
@@ -257,9 +405,10 @@ impl ScreenCastInterface {
     #[zbus(name = "OpenPipeWireRemote")]
     async fn open_pipewire_remote(
         &mut self,
-        _session_handle: ObjectPath<'_>,
+        session_handle: ObjectPath<'_>,
         _options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<ZvariantFd<'static>> {
+        tracing::info!("OpenPipeWireRemote: session={}", session_handle);
         let raw = pw_backend::open_fd()
             .map_err(|e| fdo::Error::Failed(format!("open pipewire socket: {e}")))?;
         Ok(ZvariantFd::Owned(unsafe { OwnedFd::from_raw_fd(raw) }))
@@ -277,6 +426,29 @@ impl ScreenCastInterface {
             SessionHandler::stop_niri(&self.conn, &session.niri_session_path).await;
         }
         Ok(())
+    }
+}
+
+fn select_sources_results() -> HashMap<String, OwnedValue> {
+    let mut results = HashMap::new();
+    results.insert("available_source_types".into(), OwnedValue::from(3u32));
+    results.insert("available_cursor_modes".into(), OwnedValue::from(3u32));
+    results
+}
+
+#[cfg(feature = "picker")]
+fn apply_picker_choice(session: &mut CaptureSession, choice: pick::PickerChoice) {
+    match choice {
+        pick::PickerChoice::Monitor(name) => {
+            session.source_type = 1;
+            session.output_name = Some(name);
+            session.window_id = None;
+        }
+        pick::PickerChoice::Window(id) => {
+            session.source_type = 2;
+            session.output_name = None;
+            session.window_id = Some(id);
+        }
     }
 }
 
