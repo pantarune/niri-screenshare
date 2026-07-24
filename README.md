@@ -16,8 +16,8 @@ no manual config needed — `portals.conf` is written on first service start.
 
 | build | behavior | size |
 |-------|----------|------|
-| default | dynamic cast, no dialog | 2.1 MB |
-| `--features picker` | + optional GTK4 picker | 2.2 MB |
+| default | dynamic cast, no dialog | 1.6 MB |
+| `--features picker` | + optional GTK4 picker | 1.6 MB |
 
 Debug the picker UI without starting a cast:
 
