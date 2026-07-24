@@ -6,10 +6,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features: [default, "--no-default-features"]
+        flags:
+          - ""
+          - "--no-default-features"
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
-      - run: cargo build --release ${{ matrix.features }}
-      - run: cargo test --release ${{ matrix.features }}
+      - run: cargo build --release ${{ matrix.flags }}
+      - run: cargo test --release ${{ matrix.flags }}
