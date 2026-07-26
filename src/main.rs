@@ -112,7 +112,6 @@ async fn run_portal() -> anyhow::Result<()> {
     portal_config::ensure_portals_config();
 
     let conn = zbus::connection::Builder::session()?
-        .name("org.freedesktop.impl.portal.desktop.niri")?
         .build()
         .await?;
 
@@ -121,6 +120,8 @@ async fn run_portal() -> anyhow::Result<()> {
     conn.object_server()
         .at("/org/freedesktop/portal/desktop", screencast)
         .await?;
+
+    conn.request_name("org.freedesktop.impl.portal.desktop.niri").await?;
 
     tracing::info!("listening on org.freedesktop.impl.portal.desktop.niri");
 
