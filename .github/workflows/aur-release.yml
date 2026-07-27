@@ -1,0 +1,20 @@
+name: AUR Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.0.0
+        with:
+          pkgname: niri-screenshare
+          pkgbuild: ./contrib/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
