@@ -2,7 +2,6 @@
 Description=Portal service (niri backend)
 PartOf=graphical-session.target
 After=niri.service
-ConditionEnvironment=NIRI_SOCKET
 
 [Service]
 Type=dbus

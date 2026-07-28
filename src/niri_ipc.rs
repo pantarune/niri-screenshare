@@ -23,7 +23,16 @@ pub struct NiriWindow {
 }
 
 fn niri_command() -> Command {
-    Command::new(niri_bin())
+    let mut cmd = Command::new(niri_bin());
+    if std::env::var("NIRI_SOCKET").is_err() {
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            let sock = format!("{dir}/niri.sock");
+            if Path::new(&sock).exists() {
+                cmd.env("NIRI_SOCKET", &sock);
+            }
+        }
+    }
+    cmd
 }
 
 pub fn niri_bin() -> String {
