@@ -25,14 +25,24 @@ pub struct NiriWindow {
 fn niri_command() -> Command {
     let mut cmd = Command::new(niri_bin());
     if std::env::var("NIRI_SOCKET").is_err() {
-        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-            let sock = format!("{dir}/niri.sock");
-            if Path::new(&sock).exists() {
-                cmd.env("NIRI_SOCKET", &sock);
-            }
+        if let Some(sock) = find_niri_socket() {
+            cmd.env("NIRI_SOCKET", sock);
         }
     }
     cmd
+}
+
+fn find_niri_socket() -> Option<String> {
+    let dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries {
+        let name = entry.ok()?.file_name();
+        let name = name.to_str()?.to_owned();
+        if name.starts_with("niri.wayland-") && name.ends_with(".sock") {
+            return Some(format!("{dir}/{name}"));
+        }
+    }
+    None
 }
 
 pub fn niri_bin() -> String {

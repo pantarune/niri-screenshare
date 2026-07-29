@@ -1,7 +1,8 @@
 [Unit]
 Description=Portal service (niri backend)
 PartOf=graphical-session.target
-After=niri.service
+After=graphical-session.target
+Requisite=graphical-session.target
 
 [Service]
 Type=dbus
