@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
                         std::process::exit(1);
                     }
                 }
-                return Ok(());
+                Ok(())
             }
             #[cfg(not(feature = "picker"))]
             {
