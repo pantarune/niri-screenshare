@@ -137,9 +137,7 @@ pub fn show_picker_cancellable(
         return None;
     }
 
-    let Some(stdout) = stdout else {
-        return None;
-    };
+    let stdout = stdout?;
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         let line = line.trim();
         if let Some(name) = line.strip_prefix("M:") {
