@@ -18,6 +18,10 @@ jobs:
           srcinfo_ver="$(sed -n 's/^[[:space:]]*pkgver = //p' contrib/.SRCINFO | head -n1)"
           test "$version" = "$pkgver"
           test "$version" = "$srcinfo_ver"
+          if grep -q "sha256sums=('SKIP')" contrib/PKGBUILD || grep -q '^[[:space:]]*sha256sums = SKIP$' contrib/.SRCINFO; then
+            echo '::error::AUR source checksum must not be SKIP'
+            exit 1
+          fi
 
       - name: Push to AUR
         shell: bash
