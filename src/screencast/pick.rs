@@ -58,15 +58,9 @@ pub fn show_picker_cancellable(
     if displays.is_empty() && wins.is_empty() {
         return None;
     }
-    if displays.len() + wins.len() == 1 {
-        if let Some(d) = displays.first() {
-            return Some(PickerChoice::Monitor(d.name.clone()));
-        }
-        if let Some(w) = wins.first() {
-            return Some(PickerChoice::Window(w.id));
-        }
-    }
 
+    // Even when only one target exists, screen capture still crosses a permission
+    // boundary. Never turn "one possible target" into implicit user consent.
     let bin = picker_bin();
     let mut child = match Command::new(&bin)
         .arg("--picker")
@@ -321,8 +315,7 @@ fn run_gtk_application(
         tracing::warn!("picker gtk application exited with {exit:?}");
     }
 
-    let choice = result.borrow().clone();
-    choice
+    result.borrow().clone()
 }
 
 fn build_and_present(
