@@ -1,18 +1,19 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const NEEDED_KEY: &str = "org.freedesktop.impl.portal.ScreenCast";
 const NEEDED_VALUE: &str = "niri";
 
 pub fn ensure_portals_config() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let path = Path::new(&home)
-        .join(".config")
+    let path = config_home()
         .join("xdg-desktop-portal")
         .join("portals.conf");
 
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!("portals.conf: failed to create config directory ({e})");
+            return;
+        }
     }
 
     if path.exists() {
@@ -29,10 +30,20 @@ pub fn ensure_portals_config() {
     }
 }
 
+fn config_home() -> PathBuf {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| "/root".into());
+    PathBuf::from(home).join(".config")
+}
+
 fn patch_existing(path: &Path) -> std::io::Result<bool> {
     let content = std::fs::read_to_string(path)?;
 
-    if content.contains(&format!("{NEEDED_KEY}={NEEDED_VALUE}")) {
+    if content.lines().any(|line| {
+        line.trim() == format!("{NEEDED_KEY}={NEEDED_VALUE}")
+    }) {
         return Ok(false);
     }
 
@@ -44,10 +55,7 @@ fn patch_existing(path: &Path) -> std::io::Result<bool> {
     for line in content.lines() {
         let trimmed = line.trim();
 
-        if in_preferred && !inserted
-            && trimmed.starts_with('[')
-            && trimmed != "[preferred]"
-        {
+        if in_preferred && !inserted && trimmed.starts_with('[') && trimmed != "[preferred]" {
             out.push_str(&entry);
             out.push('\n');
             inserted = true;
@@ -77,24 +85,36 @@ fn patch_existing(path: &Path) -> std::io::Result<bool> {
         out.push('\n');
     }
 
-    let tmp = path.with_extension("conf.tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(out.as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-
+    atomic_write(path, out.as_bytes())?;
     Ok(true)
 }
 
 fn write_new(path: &Path) -> std::io::Result<()> {
-    let content = format!(
-        "\
-[preferred]
-default=gtk
-{NEEDED_KEY}={NEEDED_VALUE}
-"
-    );
-    std::fs::write(path, content)
+    // Only configure the interface this backend owns. In particular, do not
+    // change the user's default FileChooser/OpenURI/etc. portal selection.
+    let content = format!("[preferred]\n{NEEDED_KEY}={NEEDED_VALUE}\n");
+    atomic_write(path, content.as_bytes())
+}
+
+fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("conf.tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_config_only_selects_screencast_backend() {
+        let expected = format!("[preferred]\n{NEEDED_KEY}={NEEDED_VALUE}\n");
+        assert!(!expected.contains("default="));
+        assert!(!expected.contains("Secret="));
+        assert!(!expected.contains("Access="));
+    }
 }
