@@ -1,8 +1,14 @@
 # niri-screenshare
 
-Portal backend for niri implementing `org.freedesktop.impl.portal.ScreenCast`.
-It can replace `xdg-desktop-portal-gnome` for screen sharing while keeping other
-portal interfaces on the user's existing backends.
+An XDG Desktop Portal ScreenCast backend for niri, with GTK4 display/window selection and PipeWire integration.
+
+[![CI](https://github.com/pantarune/niri-screenshare/actions/workflows/ci.yml/badge.svg)](https://github.com/pantarune/niri-screenshare/actions/workflows/ci.yml)
+[![AUR version](https://img.shields.io/aur/version/niri-screenshare)](https://aur.archlinux.org/packages/niri-screenshare)
+[![License: GPL-3.0](https://img.shields.io/github/license/pantarune/niri-screenshare)](LICENSE)
+
+It implements `org.freedesktop.impl.portal.ScreenCast` and can replace
+`xdg-desktop-portal-gnome` for screen sharing while keeping other portal
+interfaces on the user's existing backends.
 
 ## install
 
