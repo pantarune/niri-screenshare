@@ -10,7 +10,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "niri-screenshare";
-  version = "0.2.1";
+  version = "0.2.2";
 
   src = lib.fileset.toSource {
     root = ../.;
