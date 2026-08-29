@@ -1,0 +1,86 @@
+name: Release v0.2.2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-v0.2.2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+
+      - name: Install picker build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+
+      - name: Regenerate lockfile package version
+        run: |
+          cargo check --no-default-features
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('Cargo.lock').read_text()
+          marker = 'name = "niri-screenshare"\nversion = "0.2.2"'
+          if marker not in text:
+              raise SystemExit('Cargo.lock did not update niri-screenshare to 0.2.2')
+          PY
+
+      - name: Verify release metadata
+        run: |
+          test "$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)" = "0.2.2"
+          test "$(sed -n 's/^pkgver=//p' contrib/PKGBUILD)" = "0.2.2"
+          test "$(sed -n 's/^[[:space:]]*pkgver = //p' contrib/.SRCINFO | head -n1)" = "0.2.2"
+          grep -q 'version = "0.2.2";' nix/package.nix
+
+      - name: Validate release build
+        run: |
+          cargo fmt --all -- --check
+          cargo build --release
+          cargo test --release
+          cargo clippy --all-targets -- -D warnings
+          cargo build --release --no-default-features
+          cargo test --release --no-default-features
+          cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: Commit regenerated Cargo.lock
+        run: |
+          if ! git diff --quiet -- Cargo.lock; then
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add Cargo.lock
+            git commit -m 'release: update Cargo.lock for 0.2.2'
+            git push origin HEAD:main
+          fi
+
+      - name: Create v0.2.2 GitHub release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          if gh release view v0.2.2 >/dev/null 2>&1; then
+            echo 'v0.2.2 release already exists'
+          else
+            gh release create v0.2.2 \
+              --target "$sha" \
+              --title 'v0.2.2' \
+              --generate-notes
+          fi
+
+      - name: Publish v0.2.2 to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.0.0
+        with:
+          pkgname: niri-screenshare
+          pkgbuild: ./contrib/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
