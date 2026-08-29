@@ -10,9 +10,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("check") | Some("--check") => {
-            cmd_check()
-        }
+        Some("check") | Some("--check") => cmd_check(),
         Some("--picker") | Some("--debug-picker") => {
             #[cfg(feature = "picker")]
             {
@@ -46,14 +44,12 @@ fn main() -> anyhow::Result<()> {
 fn cmd_check() -> anyhow::Result<()> {
     println!("niri-screenshare check\n");
 
-    // 1. niri IPC
     print!("niri IPC ... ");
     match niri_ipc::focused_output_name() {
         Ok(name) => println!("OK (focused output: {name})"),
         Err(e) => println!("FAIL: {e}"),
     }
 
-    // 2 + 3: D-Bus names via dbus-send
     for (label, name) in [
         ("portal backend", "org.freedesktop.impl.portal.desktop.niri"),
         ("Mutter.ScreenCast", "org.gnome.Mutter.ScreenCast"),
@@ -67,7 +63,7 @@ fn cmd_check() -> anyhow::Result<()> {
                 "--print-reply",
                 "/org/freedesktop/DBus",
                 "org.freedesktop.DBus.NameHasOwner",
-                &format!("string:{}", name),
+                &format!("string:{name}"),
             ])
             .output();
         match out {
@@ -83,16 +79,20 @@ fn cmd_check() -> anyhow::Result<()> {
         }
     }
 
-    // 4. Portals config
     print!("portals.conf ... ");
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let conf_path = std::path::Path::new(&home)
-        .join(".config")
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_else(|| "/root".into());
+            std::path::PathBuf::from(home).join(".config")
+        });
+    let conf_path = config_home
         .join("xdg-desktop-portal")
         .join("portals.conf");
     if conf_path.exists() {
         let content = std::fs::read_to_string(&conf_path).unwrap_or_default();
-        if content.contains("ScreenCast=niri") {
+        if content.contains("org.freedesktop.impl.portal.ScreenCast=niri") {
             println!("OK");
         } else {
             println!("WARN: exists but missing ScreenCast=niri");
@@ -111,17 +111,15 @@ async fn run_portal() -> anyhow::Result<()> {
     tracing::debug!("stale sessions from previous instance will be dropped");
     portal_config::ensure_portals_config();
 
-    let conn = zbus::connection::Builder::session()?
-        .build()
-        .await?;
-
+    let conn = zbus::connection::Builder::session()?.build().await?;
     let screencast = screencast::ScreenCastInterface::new(conn.clone());
 
     conn.object_server()
         .at("/org/freedesktop/portal/desktop", screencast)
         .await?;
 
-    conn.request_name("org.freedesktop.impl.portal.desktop.niri").await?;
+    conn.request_name("org.freedesktop.impl.portal.desktop.niri")
+        .await?;
 
     tracing::info!("listening on org.freedesktop.impl.portal.desktop.niri");
 
