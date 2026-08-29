@@ -10,6 +10,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify tag and package metadata match
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          pkgver="$(sed -n 's/^pkgver=//p' contrib/PKGBUILD)"
+          srcinfo_ver="$(sed -n 's/^[[:space:]]*pkgver = //p' contrib/.SRCINFO | head -n1)"
+          test "$version" = "$pkgver"
+          test "$version" = "$srcinfo_ver"
+
       - name: Push to AUR
         uses: KSXGitHub/github-actions-deploy-aur@v4.0.0
         with:
