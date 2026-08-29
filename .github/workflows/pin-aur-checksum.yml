@@ -1,0 +1,112 @@
+name: Pin AUR checksum
+
+on:
+  push:
+    paths:
+      - .github/workflows/pin-aur-checksum.yml
+
+permissions:
+  contents: write
+
+jobs:
+  pin-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pin v0.2.2 source checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/niri-screenshare-0.2.2.tar.gz"
+          url='https://github.com/pantarune/niri-screenshare/archive/v0.2.2.tar.gz'
+          curl --fail --location --silent --show-error "$url" --output "$archive"
+          hash="$(sha256sum "$archive" | awk '{print $1}')"
+          test "${#hash}" -eq 64
+
+          python3 - "$hash" <<'PY'
+          from pathlib import Path
+          import re, sys
+
+          h = sys.argv[1]
+          pkg = Path('contrib/PKGBUILD')
+          text = pkg.read_text()
+          text = re.sub(r'^pkgrel=.*$', 'pkgrel=2', text, flags=re.M)
+          text = re.sub(r"^sha256sums=\([^\n]*\)$", f"sha256sums=('{h}')", text, flags=re.M)
+          pkg.write_text(text)
+
+          src = Path('contrib/.SRCINFO')
+          text = src.read_text()
+          text = re.sub(r'^\tpkgrel = .*$', '\tpkgrel = 2', text, flags=re.M)
+          text = re.sub(r'^\tsha256sums = .*$', f'\tsha256sums = {h}', text, flags=re.M)
+          src.write_text(text)
+          PY
+
+          grep -q '^pkgver=0.2.2$' contrib/PKGBUILD
+          grep -q '^pkgrel=2$' contrib/PKGBUILD
+          grep -q "^sha256sums=('${hash}')$" contrib/PKGBUILD
+          grep -q '^\tpkgver = 0.2.2$' contrib/.SRCINFO
+          grep -q '^\tpkgrel = 2$' contrib/.SRCINFO
+          grep -q "^\tsha256sums = ${hash}$" contrib/.SRCINFO
+          echo "$hash  $archive" | sha256sum --check
+          echo "Pinned SHA-256: $hash"
+
+      - name: Commit packaging hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'pantarune'
+          git config user.email '176167047+pantarune@users.noreply.github.com'
+          git add contrib/PKGBUILD contrib/.SRCINFO
+          git commit -m 'Pin v0.2.2 AUR source checksum'
+          git push origin HEAD:main
+
+      - name: Publish 0.2.2-2 to AUR
+        shell: bash
+        env:
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/aur_key"
+          raw="$AUR_SSH_PRIVATE_KEY"
+          raw="${raw#\"}"
+          raw="${raw%\"}"
+          printf '%b' "$raw" | tr -d '\r' > "$key"
+          chmod 600 "$key"
+          if ! ssh-keygen -y -f "$key" >/dev/null 2>&1; then
+            printf '%s' "$raw" | tr -d '\r\n ' | base64 -d > "$key" 2>/dev/null || true
+            chmod 600 "$key"
+          fi
+          ssh-keygen -y -f "$key" >/dev/null
+
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+          git clone ssh://aur@aur.archlinux.org/niri-screenshare.git "$RUNNER_TEMP/aur-repo"
+          cp contrib/PKGBUILD "$RUNNER_TEMP/aur-repo/PKGBUILD"
+          cp contrib/.SRCINFO "$RUNNER_TEMP/aur-repo/.SRCINFO"
+          cd "$RUNNER_TEMP/aur-repo"
+          git config user.name "${AUR_USERNAME:-pantarune}"
+          git config user.email '176167047+pantarune@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO
+          git commit -m 'Update to 0.2.2-2'
+          git push origin HEAD:master
+
+      - name: Remove one-shot workflow
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+          git config user.name 'pantarune'
+          git config user.email '176167047+pantarune@users.noreply.github.com'
+          git rm .github/workflows/pin-aur-checksum.yml
+          git commit -m 'Remove checksum migration workflow'
+          git push origin HEAD:main
