@@ -135,7 +135,10 @@ impl SessionHandler {
                 .remove::<SessionHandler, _>(self.session_id.as_str())
                 .await
             {
-                tracing::debug!("failed to unregister session object {}: {e}", self.session_id);
+                tracing::debug!(
+                    "failed to unregister session object {}: {e}",
+                    self.session_id
+                );
             }
         }
 
@@ -232,7 +235,9 @@ impl ScreenCastInterface {
                 fdo::Error::Failed(format!("session {} not found", session_handle))
             })?;
             if session.state != CaptureState::Created {
-                return Err(fdo::Error::Failed("cannot select sources after Start".into()));
+                return Err(fdo::Error::Failed(
+                    "cannot select sources after Start".into(),
+                ));
             }
             session.cursor_mode = cursor_niri;
             session.source_type = requested_types;
@@ -285,8 +290,8 @@ impl ScreenCastInterface {
             .await;
             self.picker.finish(&session_id, &child_slot);
 
-            let choice = joined
-                .map_err(|e| fdo::Error::Failed(format!("picker task failed: {e}")))?;
+            let choice =
+                joined.map_err(|e| fdo::Error::Failed(format!("picker task failed: {e}")))?;
 
             let mut state = self.state.lock().await;
             let Some(session) = state.get_mut(session_handle.as_str()) else {
@@ -320,17 +325,21 @@ impl ScreenCastInterface {
             return Ok((2, HashMap::new()));
         }
 
-        let output_name = niri_ipc::focused_output_name()
-            .ok()
-            .or_else(|| niri_ipc::list_outputs().ok()?.into_iter().next().map(|o| o.name));
+        let output_name = niri_ipc::focused_output_name().ok().or_else(|| {
+            niri_ipc::list_outputs()
+                .ok()?
+                .into_iter()
+                .next()
+                .map(|o| o.name)
+        });
         let Some(output_name) = output_name else {
             return Ok((2, HashMap::new()));
         };
 
         let mut state = self.state.lock().await;
-        let session = state.get_mut(session_handle.as_str()).ok_or_else(|| {
-            fdo::Error::Failed(format!("session {} not found", session_handle))
-        })?;
+        let session = state
+            .get_mut(session_handle.as_str())
+            .ok_or_else(|| fdo::Error::Failed(format!("session {} not found", session_handle)))?;
         session.source_type = 1;
         session.output_name = Some(output_name);
         session.window_id = None;
@@ -436,10 +445,7 @@ impl ScreenCastInterface {
             Value::from(if source_type & 2 != 0 { 2u32 } else { 1u32 }),
         );
         if let Some((width, height)) = size {
-            stream_properties.insert(
-                "size".into(),
-                Value::from((width as i32, height as i32)),
-            );
+            stream_properties.insert("size".into(), Value::from((width as i32, height as i32)));
         }
 
         let stream_value: Value<'_> = (node_id, stream_properties).into();
@@ -647,15 +653,23 @@ async fn start_and_get_node_id(
 }
 
 fn get_window_size(window_id: u64) -> Option<(u32, u32)> {
-    niri_ipc::list_windows().ok()?.into_iter().find_map(|window| {
-        (window.id == window_id).then(|| positive_size(window.size.width, window.size.height))?
-    })
+    niri_ipc::list_windows()
+        .ok()?
+        .into_iter()
+        .find_map(|window| {
+            (window.id == window_id)
+                .then(|| positive_size(window.size.width, window.size.height))?
+        })
 }
 
 fn get_output_size(output_name: &str) -> Option<(u32, u32)> {
-    niri_ipc::list_outputs().ok()?.into_iter().find_map(|output| {
-        (output.name == output_name).then(|| positive_size(output.logical.width, output.logical.height))?
-    })
+    niri_ipc::list_outputs()
+        .ok()?
+        .into_iter()
+        .find_map(|output| {
+            (output.name == output_name)
+                .then(|| positive_size(output.logical.width, output.logical.height))?
+        })
 }
 
 fn positive_size(width: i32, height: i32) -> Option<(u32, u32)> {

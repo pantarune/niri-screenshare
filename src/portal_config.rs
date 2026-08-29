@@ -41,9 +41,10 @@ fn config_home() -> PathBuf {
 fn patch_existing(path: &Path) -> std::io::Result<bool> {
     let content = std::fs::read_to_string(path)?;
 
-    if content.lines().any(|line| {
-        line.trim() == format!("{NEEDED_KEY}={NEEDED_VALUE}")
-    }) {
+    if content
+        .lines()
+        .any(|line| line.trim() == format!("{NEEDED_KEY}={NEEDED_VALUE}"))
+    {
         return Ok(false);
     }
 

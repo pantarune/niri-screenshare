@@ -87,9 +87,7 @@ fn cmd_check() -> anyhow::Result<()> {
             let home = std::env::var_os("HOME").unwrap_or_else(|| "/root".into());
             std::path::PathBuf::from(home).join(".config")
         });
-    let conf_path = config_home
-        .join("xdg-desktop-portal")
-        .join("portals.conf");
+    let conf_path = config_home.join("xdg-desktop-portal").join("portals.conf");
     if conf_path.exists() {
         let content = std::fs::read_to_string(&conf_path).unwrap_or_default();
         if content.contains("org.freedesktop.impl.portal.ScreenCast=niri") {

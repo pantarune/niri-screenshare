@@ -188,7 +188,13 @@ fn write_picker_targets(
 ) -> std::io::Result<()> {
     // D:name\tw\th  W:id\ttitle\tapp\tw\th  END
     for d in displays {
-        writeln!(out, "D:{}\t{}\t{}", escape_field(&d.name), d.width, d.height)?;
+        writeln!(
+            out,
+            "D:{}\t{}\t{}",
+            escape_field(&d.name),
+            d.width,
+            d.height
+        )?;
     }
     for w in windows {
         writeln!(
@@ -307,7 +313,12 @@ fn run_gtk_application(
 
     let result_activate = result.clone();
     app.connect_activate(move |app| {
-        build_and_present(app, displays.clone(), windows.clone(), result_activate.clone());
+        build_and_present(
+            app,
+            displays.clone(),
+            windows.clone(),
+            result_activate.clone(),
+        );
     });
 
     let exit = app.run_with_args::<&str>(&[]);

@@ -261,7 +261,8 @@ mod tests {
 
     #[test]
     fn parse_windows_handles_escapes_in_title() {
-        let raw = r#"[{"id": 1, "title": "a \"quoted\" name", "layout": {"window_size": [100, 100]}}]"#;
+        let raw =
+            r#"[{"id": 1, "title": "a \"quoted\" name", "layout": {"window_size": [100, 100]}}]"#;
         let windows = parse_windows(raw).unwrap();
         assert_eq!(windows[0].title, "a \"quoted\" name");
     }
