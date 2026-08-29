@@ -1,6 +1,6 @@
 [package]
 name = "niri-screenshare"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Portal backend implementing ScreenCast for niri"
 license = "GPL-3.0-or-later"
