@@ -1,0 +1,51 @@
+name: Polish repository
+
+on:
+  push:
+    paths:
+      - .github/workflows/polish-repo.yml
+
+permissions:
+  contents: write
+
+jobs:
+  polish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Improve v0.2.2 release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          ## Highlights
+
+          - Hardened ScreenCast session lifecycle, cleanup, and retry behavior.
+          - Added explicit picker consent and correct requested source-type filtering.
+          - Corrected portal protocol behavior, including cursor defaults and advertised interface version.
+          - Made portal configuration XDG-aware without replacing unrelated portal backends.
+          - Made niri IPC socket selection deterministic and fail-safe when ambiguous.
+          - Updated Arch/AUR and Nix packaging for the release.
+          - Expanded CI to cover formatting, builds, tests, and Clippy with and without default features.
+
+          **Full changelog:** https://github.com/pantarune/niri-screenshare/compare/v0.2.1...v0.2.2
+          EOF
+          gh release edit v0.2.2 --repo "$GITHUB_REPOSITORY" --title 'v0.2.2' --notes-file "$RUNNER_TEMP/release-notes.md"
+
+      - name: Update repository details
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY" \
+            -f description='XDG Desktop Portal ScreenCast backend for niri with GTK4 source selection and PipeWire integration.' \
+            -f homepage='https://aur.archlinux.org/packages/niri-screenshare' \
+            -F has_projects=false \
+            -F has_wiki=false
+
+      - name: Set repository topics
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' '{"names":["niri","wayland","xdg-desktop-portal","pipewire","screensharing","rust"]}' > "$RUNNER_TEMP/topics.json"
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/topics" --input "$RUNNER_TEMP/topics.json"
