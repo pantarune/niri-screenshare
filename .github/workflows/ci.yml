@@ -1,72 +1,21 @@
-name: Apply hardening fixes
-on: [push]
-
-permissions:
-  contents: write
+name: CI
+on: [push, pull_request]
 
 jobs:
-  patch:
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flags:
+          - ""
+          - "--no-default-features"
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: rustfmt
-      - name: Apply targeted fixes
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          picker = Path("src/screencast/pick.rs")
-          text = picker.read_text()
-          old = "    result.borrow().clone()\n}"
-          new = "    let choice = result.borrow().clone();\n    choice\n}"
-          assert old in text, "picker return pattern not found"
-          picker.write_text(text.replace(old, new, 1))
-
-          portal = Path("src/screencast/mod.rs")
-          text = portal.read_text()
-          old = '''        // Session objects are one-shot. Remove the D-Bus object after Close so
-        // a long-running portal daemon does not accumulate stale object paths.
-        if let Some(conn) = &self.conn {
-            if let Err(e) = conn
-                .object_server()
-                .remove::<SessionHandler, _>(self.session_id.as_str())
-                .await
-            {
-                tracing::debug!(
-                    "failed to unregister session object {}: {e}",
-                    self.session_id
-                );
-            }
-        }
-'''
-          new = '''        // Session objects are one-shot. Defer removal until this Close call
-        // releases its mutable interface lock, avoiding self-locking ObjectServer.
-        if let Some(conn) = self.conn.clone() {
-            let session_id = self.session_id.clone();
-            let _cleanup_task = tokio::spawn(async move {
-                tokio::task::yield_now().await;
-                if let Err(e) = conn
-                    .object_server()
-                    .remove::<SessionHandler, _>(session_id.as_str())
-                    .await
-                {
-                    tracing::debug!(
-                        "failed to unregister session object {}: {e}",
-                        session_id
-                    );
-                }
-            });
-        }
-'''
-          assert old in text, "session removal pattern not found"
-          portal.write_text(text.replace(old, new, 1))
-          PY
-
-          cargo fmt --all
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/screencast/pick.rs src/screencast/mod.rs
-          git commit -m 'fix: finish portal lifecycle hardening'
-          git push
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+      - run: cargo fmt --all -- --check
+      - run: cargo build --release ${{ matrix.flags }}
+      - run: cargo test --release ${{ matrix.flags }}
+      - run: cargo clippy --all-targets ${{ matrix.flags }} -- -D warnings
