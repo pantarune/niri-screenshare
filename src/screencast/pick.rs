@@ -326,7 +326,8 @@ fn run_gtk_application(
         tracing::warn!("picker gtk application exited with {exit:?}");
     }
 
-    result.borrow().clone()
+    let choice = result.borrow().clone();
+    choice
 }
 
 fn build_and_present(
