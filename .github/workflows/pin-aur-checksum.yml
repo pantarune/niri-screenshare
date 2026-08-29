@@ -47,9 +47,9 @@ jobs:
           grep -q '^pkgver=0.2.2$' contrib/PKGBUILD
           grep -q '^pkgrel=2$' contrib/PKGBUILD
           grep -q "^sha256sums=('${hash}')$" contrib/PKGBUILD
-          grep -q '^\tpkgver = 0.2.2$' contrib/.SRCINFO
-          grep -q '^\tpkgrel = 2$' contrib/.SRCINFO
-          grep -q "^\tsha256sums = ${hash}$" contrib/.SRCINFO
+          grep -Eq '^[[:space:]]*pkgver = 0\.2\.2$' contrib/.SRCINFO
+          grep -Eq '^[[:space:]]*pkgrel = 2$' contrib/.SRCINFO
+          grep -Eq "^[[:space:]]*sha256sums = ${hash}$" contrib/.SRCINFO
           echo "$hash  $archive" | sha256sum --check
           echo "Pinned SHA-256: $hash"
 
