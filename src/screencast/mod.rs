@@ -42,6 +42,10 @@ struct CaptureSession {
     window_id: Option<u64>,
     node_id: u32,
     persist_mode: u32,
+    /// Whether the current target came from the picker (or a restore replaying
+    /// one). Pickerless mode auto-picks the focused output with nobody asked, so
+    /// that selection is never handed back as a restore token.
+    user_selected: bool,
 }
 
 struct SessionHandler {
@@ -189,6 +193,7 @@ impl ScreenCastInterface {
                 window_id: None,
                 node_id: 0,
                 persist_mode: 0,
+                user_selected: false,
             },
         );
 
@@ -247,6 +252,7 @@ impl ScreenCastInterface {
             session.output_name = None;
             session.window_id = None;
             session.persist_mode = persist_mode;
+            session.user_selected = false;
         }
 
         // A restore replaces the picker entirely, so it must clear the same bar:
@@ -392,7 +398,7 @@ impl ScreenCastInterface {
             .clone()
             .ok_or_else(|| fdo::Error::Failed("no D-Bus connection".into()))?;
 
-        let (source_type, output_name, window_id, cursor_mode, persist_mode) = {
+        let (source_type, output_name, window_id, cursor_mode, persist_mode, user_selected) = {
             let mut sessions = self.state.lock().await;
             let session = sessions.get_mut(session_handle.as_str()).ok_or_else(|| {
                 fdo::Error::Failed(format!("session {} not found", session_handle))
@@ -414,6 +420,7 @@ impl ScreenCastInterface {
                 session.window_id,
                 session.cursor_mode,
                 session.persist_mode,
+                session.user_selected,
             )
         };
 
@@ -473,8 +480,9 @@ impl ScreenCastInterface {
         }
 
         // Tokens are single use, so every successful Start has to hand back a
-        // fresh one or the app can only restore once.
-        if persist_mode != 0 {
+        // fresh one or the app can only restore once. Pickerless mode has no
+        // selection to persist, so it issues none.
+        if persist_mode != 0 && user_selected {
             if let Some(target) = restore_target(source_type, output_name.as_deref(), window_id) {
                 if let Ok(data) = build_restore_data(&target).try_to_owned() {
                     results.insert("restore_data".into(), data);
@@ -526,7 +534,19 @@ const RESTORE_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RestoreTarget {
     Monitor(String),
-    Window(u64),
+    Window(WindowIdentity),
+}
+
+/// A niri window id is only unique within one compositor session: after a niri
+/// restart the counter starts over, so a stored id can name a different window
+/// than the one the user picked. Identity is the id together with the app id and
+/// title it was granted under, and all three have to still agree before a
+/// restore may stand in for the picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowIdentity {
+    id: u64,
+    app_id: String,
+    title: String,
 }
 
 impl RestoreTarget {
@@ -576,10 +596,13 @@ fn parse_restore_data(value: &OwnedValue) -> Option<RestoreTarget> {
     if let Some(name) = private.get("output_name").and_then(value_str) {
         return Some(RestoreTarget::Monitor(name));
     }
-    private
-        .get("window_id")
-        .and_then(value_u64)
-        .map(RestoreTarget::Window)
+    // Partial window data cannot be matched against a live window, so it is
+    // rejected outright rather than restored on the id alone.
+    Some(RestoreTarget::Window(WindowIdentity {
+        id: private.get("window_id").and_then(value_u64)?,
+        app_id: private.get("window_app_id").and_then(value_str)?,
+        title: private.get("window_title").and_then(value_str)?,
+    }))
 }
 
 fn build_restore_data(target: &RestoreTarget) -> Value<'static> {
@@ -588,8 +611,10 @@ fn build_restore_data(target: &RestoreTarget) -> Value<'static> {
         RestoreTarget::Monitor(name) => {
             private.insert("output_name".into(), Value::from(name.clone()));
         }
-        RestoreTarget::Window(id) => {
-            private.insert("window_id".into(), Value::from(*id));
+        RestoreTarget::Window(window) => {
+            private.insert("window_id".into(), Value::from(window.id));
+            private.insert("window_app_id".into(), Value::from(window.app_id.clone()));
+            private.insert("window_title".into(), Value::from(window.title.clone()));
         }
     }
     Value::from((
@@ -605,11 +630,25 @@ fn restore_target(
     window_id: Option<u64>,
 ) -> Option<RestoreTarget> {
     if source_type & 2 != 0 {
-        return window_id.map(RestoreTarget::Window);
+        // The window is live at this point, so its identity is read back from
+        // niri rather than assumed; without it there is nothing safe to store.
+        return window_id
+            .and_then(window_identity)
+            .map(RestoreTarget::Window);
     }
-    // Pickerless mode resolves the focused output inside start_capture, so there
-    // is no name to store and nothing to restore.
     output_name.map(|name| RestoreTarget::Monitor(name.to_string()))
+}
+
+fn window_identity(id: u64) -> Option<WindowIdentity> {
+    niri_ipc::list_windows()
+        .ok()?
+        .into_iter()
+        .find(|window| window.id == id)
+        .map(|window| WindowIdentity {
+            id,
+            app_id: window.app_id,
+            title: window.title,
+        })
 }
 
 /// Window ids are per compositor session, so a stored one can point at nothing
@@ -619,8 +658,8 @@ fn restore_target_available(target: &RestoreTarget) -> bool {
         RestoreTarget::Monitor(name) => niri_ipc::list_outputs()
             .map(|outputs| outputs.iter().any(|output| &output.name == name))
             .unwrap_or(false),
-        RestoreTarget::Window(id) => niri_ipc::list_windows()
-            .map(|windows| windows.iter().any(|window| window.id == *id))
+        RestoreTarget::Window(target) => niri_ipc::list_windows()
+            .map(|windows| windows.iter().any(|window| window_is(window, target)))
             .unwrap_or(false),
     }
 }
@@ -632,12 +671,21 @@ fn apply_restore_target(session: &mut CaptureSession, target: RestoreTarget) {
             session.output_name = Some(name);
             session.window_id = None;
         }
-        RestoreTarget::Window(id) => {
+        RestoreTarget::Window(window) => {
             session.source_type = 2;
             session.output_name = None;
-            session.window_id = Some(id);
+            session.window_id = Some(window.id);
         }
     }
+    // A restore stands in for a selection the user made in the picker, so it
+    // carries the same standing to hand back a fresh token.
+    session.user_selected = true;
+}
+
+/// A recycled id is not the window that was picked, so the app id and title have
+/// to match as well.
+fn window_is(window: &niri_ipc::NiriWindow, target: &WindowIdentity) -> bool {
+    window.id == target.id && window.app_id == target.app_id && window.title == target.title
 }
 
 fn normalize_source_types(value: Option<u32>) -> Option<u32> {
@@ -677,6 +725,7 @@ fn apply_picker_choice(session: &mut CaptureSession, choice: pick::PickerChoice)
             session.window_id = Some(id);
         }
     }
+    session.user_selected = true;
 }
 
 async fn start_capture(
@@ -873,16 +922,36 @@ mod tests {
         assert_eq!(parse_restore_data(&data), Some(target));
     }
 
+    fn window(id: u64) -> WindowIdentity {
+        WindowIdentity {
+            id,
+            app_id: "org.example.App".into(),
+            title: "Notes".into(),
+        }
+    }
+
+    fn live_window(id: u64, app_id: &str, title: &str) -> niri_ipc::NiriWindow {
+        niri_ipc::NiriWindow {
+            id,
+            title: title.into(),
+            app_id: app_id.into(),
+            size: niri_ipc::Size {
+                width: 100,
+                height: 100,
+            },
+        }
+    }
+
     #[test]
     fn restore_data_roundtrips_a_window() {
-        let target = RestoreTarget::Window(42);
+        let target = RestoreTarget::Window(window(42));
         let data = build_restore_data(&target).try_to_owned().unwrap();
         assert_eq!(parse_restore_data(&data), Some(target));
     }
 
     #[test]
     fn restore_data_signature_matches_the_portal_spec() {
-        let data = build_restore_data(&RestoreTarget::Window(1));
+        let data = build_restore_data(&RestoreTarget::Window(window(1)));
         assert_eq!(data.value_signature().to_string(), "(suv)");
     }
 
@@ -897,9 +966,52 @@ mod tests {
     }
 
     #[test]
+    fn restore_data_without_window_identity_is_ignored() {
+        // Pre-identity data can only be matched on a recycled id, so it is
+        // rejected and the picker opens instead.
+        let mut private: HashMap<String, Value<'static>> = HashMap::new();
+        private.insert("window_id".into(), Value::from(7u64));
+        let legacy = Value::from((
+            RESTORE_VENDOR.to_string(),
+            RESTORE_VERSION,
+            Value::from(private),
+        ))
+        .try_to_owned()
+        .unwrap();
+        assert_eq!(parse_restore_data(&legacy), None);
+    }
+
+    #[test]
+    fn a_recycled_window_id_is_not_the_window_that_was_picked() {
+        let target = window(5);
+        assert!(window_is(
+            &live_window(5, "org.example.App", "Notes"),
+            &target
+        ));
+        // Same id after a niri restart, different window: prompt, never restore.
+        assert!(!window_is(
+            &live_window(5, "org.other.App", "Notes"),
+            &target
+        ));
+        assert!(!window_is(
+            &live_window(5, "org.example.App", "Inbox"),
+            &target
+        ));
+        assert!(!window_is(
+            &live_window(6, "org.example.App", "Notes"),
+            &target
+        ));
+    }
+
+    #[test]
     fn restore_data_from_a_future_version_is_ignored() {
         let mut private: HashMap<String, Value<'static>> = HashMap::new();
         private.insert("window_id".into(), Value::from(7u64));
+        private.insert(
+            "window_app_id".into(),
+            Value::from("org.example.App".to_string()),
+        );
+        private.insert("window_title".into(), Value::from("Notes".to_string()));
         let newer = Value::from((
             RESTORE_VENDOR.to_string(),
             RESTORE_VERSION + 1,
@@ -913,18 +1025,14 @@ mod tests {
     #[test]
     fn restore_target_source_type_gates_against_requested_types() {
         // A stored window must not be restored into a displays-only request.
-        assert_eq!(RestoreTarget::Window(1).source_type() & 1, 0);
-        assert_eq!(RestoreTarget::Window(1).source_type() & 2, 2);
+        assert_eq!(RestoreTarget::Window(window(1)).source_type() & 1, 0);
+        assert_eq!(RestoreTarget::Window(window(1)).source_type() & 2, 2);
         assert_eq!(RestoreTarget::Monitor("DP-1".into()).source_type() & 2, 0);
         assert_eq!(RestoreTarget::Monitor("DP-1".into()).source_type() & 1, 1);
     }
 
     #[test]
-    fn restore_target_prefers_window_when_capturing_one() {
-        assert_eq!(
-            restore_target(2, None, Some(9)),
-            Some(RestoreTarget::Window(9))
-        );
+    fn restore_target_stores_the_selected_monitor() {
         assert_eq!(
             restore_target(1, Some("DP-1"), None),
             Some(RestoreTarget::Monitor("DP-1".into()))
@@ -932,8 +1040,10 @@ mod tests {
     }
 
     #[test]
-    fn restore_target_is_absent_for_pickerless_focused_output() {
+    fn restore_target_is_absent_without_a_target() {
         assert_eq!(restore_target(1, None, None), None);
+        // A window that niri no longer lists has no identity to store.
+        assert_eq!(restore_target(2, None, None), None);
     }
 
     #[test]
@@ -948,11 +1058,14 @@ mod tests {
             window_id: None,
             node_id: 0,
             persist_mode: 1,
+            user_selected: false,
         };
-        apply_restore_target(&mut session, RestoreTarget::Window(5));
+        apply_restore_target(&mut session, RestoreTarget::Window(window(5)));
         assert_eq!(session.source_type, 2);
         assert_eq!(session.window_id, Some(5));
         assert_eq!(session.output_name, None);
+        // A restore replays a picker selection, so it may be persisted again.
+        assert!(session.user_selected);
     }
 
     #[test]
