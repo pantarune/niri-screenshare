@@ -464,9 +464,9 @@ fn build_and_present(
     glib::timeout_add_local_once(Duration::from_millis(50), focus_picker_on_niri);
 }
 
-/// Opens the picker on a tab that has something to pick. SelectSources already
-/// filtered the lists to the requested source types, so an empty side means
-/// that type was not asked for.
+/// Opens the picker on a tab with available targets. SelectSources filters
+/// the lists to the requested source types, so an empty side is either
+/// unrequested or has no currently available targets.
 fn initial_page(has_displays: bool, has_windows: bool) -> &'static str {
     if !has_displays && has_windows {
         "windows"
