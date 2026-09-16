@@ -374,6 +374,8 @@ fn build_and_present(
     let windows_page = stack.add_titled(&window_scroll, Some("windows"), "Windows");
     windows_page.set_icon_name(Some("window-symbolic"));
 
+    stack.set_visible_child_name(initial_page(!displays.is_empty(), !windows.is_empty()));
+
     let cancel = gtk4::Button::with_label("Cancel");
     cancel.add_css_class("pill");
     let share = gtk4::Button::with_label("Share");
@@ -460,6 +462,17 @@ fn build_and_present(
 
     window.present();
     glib::timeout_add_local_once(Duration::from_millis(50), focus_picker_on_niri);
+}
+
+/// Opens the picker on a tab with available targets. SelectSources filters
+/// the lists to the requested source types, so an empty side is either
+/// unrequested or has no currently available targets.
+fn initial_page(has_displays: bool, has_windows: bool) -> &'static str {
+    if !has_displays && has_windows {
+        "windows"
+    } else {
+        "displays"
+    }
 }
 
 fn build_display_list(
@@ -644,6 +657,22 @@ mod tests {
     #[test]
     fn unescape_handles_trailing_backslash() {
         assert_eq!(unescape_field("end\\"), "end\\");
+    }
+
+    #[test]
+    fn initial_page_prefers_windows_when_no_displays() {
+        assert_eq!(initial_page(false, true), "windows");
+    }
+
+    #[test]
+    fn initial_page_stays_on_displays_when_present() {
+        assert_eq!(initial_page(true, true), "displays");
+        assert_eq!(initial_page(true, false), "displays");
+    }
+
+    #[test]
+    fn initial_page_falls_back_to_displays_when_empty() {
+        assert_eq!(initial_page(false, false), "displays");
     }
 
     #[test]
