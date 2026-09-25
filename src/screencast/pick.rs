@@ -460,8 +460,17 @@ fn build_and_present(
         );
     }
 
+    // niri floats fixed-size windows at map time, so opening non-resizable makes
+    // the picker come up floating instead of being tiled and moved afterwards.
+    // Resizability is handed back once it is mapped; the floating state sticks.
+    window.set_resizable(false);
+    window.connect_map(|window| {
+        let window = window.clone();
+        glib::timeout_add_local_once(Duration::from_millis(150), move || {
+            window.set_resizable(true);
+        });
+    });
     window.present();
-    glib::timeout_add_local_once(Duration::from_millis(50), focus_picker_on_niri);
 }
 
 /// Opens the picker on a tab with available targets. SelectSources filters
@@ -570,45 +579,6 @@ fn empty_label(text: &str) -> Label {
     label.set_margin_bottom(24);
     label.set_halign(Align::Center);
     label
-}
-
-fn focus_picker_on_niri() {
-    focus_picker_on_niri_attempt(0);
-}
-
-fn focus_picker_on_niri_attempt(attempt: u32) {
-    if try_float_picker_window() || attempt >= 20 {
-        return;
-    }
-    glib::timeout_add_local_once(Duration::from_millis(50), move || {
-        focus_picker_on_niri_attempt(attempt + 1);
-    });
-}
-
-fn try_float_picker_window() -> bool {
-    let Ok(windows) = crate::niri_ipc::list_windows() else {
-        return false;
-    };
-    let Some(w) = windows.iter().rev().find(|w| {
-        w.app_id == PICKER_APP_ID
-            || w.app_id.contains("screenshare.picker")
-            || w.app_id.contains("niri-screenshare-picker")
-            || w.title == "Screen Sharing"
-    }) else {
-        return false;
-    };
-    let id = w.id.to_string();
-    let niri = crate::niri_ipc::niri_bin();
-    let _ = Command::new(&niri)
-        .args(["msg", "action", "focus-window", "--id", &id])
-        .output();
-    let _ = Command::new(&niri)
-        .args(["msg", "action", "move-window-to-floating", "--id", &id])
-        .output();
-    let _ = Command::new(&niri)
-        .args(["msg", "action", "center-window", "--id", &id])
-        .output();
-    true
 }
 
 impl From<&NiriOutput> for DisplayItem {
