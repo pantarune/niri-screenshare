@@ -41,6 +41,11 @@ struct CaptureSession {
     output_name: Option<String>,
     window_id: Option<u64>,
     node_id: u32,
+    persist_mode: u32,
+    /// Whether the current target came from the picker (or a restore replaying
+    /// one). Pickerless mode auto-picks the focused output with nobody asked, so
+    /// that selection is never handed back as a restore token.
+    user_selected: bool,
 }
 
 struct SessionHandler {
@@ -148,11 +153,11 @@ impl SessionHandler {
 
 #[interface(name = "org.freedesktop.impl.portal.ScreenCast")]
 impl ScreenCastInterface {
-    // Version 4 introduced persistence/restore_data. We intentionally advertise
-    // v3 until those semantics are implemented rather than claiming support.
+    // Version 4 adds persistence: restore_data in, restore_data plus the granted
+    // persist_mode out. See grant_persist_mode for which levels are granted.
     #[zbus(property, name = "version")]
     fn version_prop(&self) -> u32 {
-        3
+        4
     }
 
     #[zbus(property)]
@@ -187,6 +192,8 @@ impl ScreenCastInterface {
                 output_name: None,
                 window_id: None,
                 node_id: 0,
+                persist_mode: 0,
+                user_selected: false,
             },
         );
 
@@ -228,6 +235,7 @@ impl ScreenCastInterface {
         let requested_types = normalize_source_types(options.get("types").and_then(value_u32))
             .ok_or_else(|| fdo::Error::InvalidArgs("no supported source type requested".into()))?;
         let cursor_niri = portal_cursor_to_niri(options.get("cursor_mode").and_then(value_u32));
+        let persist_mode = grant_persist_mode(options.get("persist_mode").and_then(value_u32));
 
         {
             let mut state = self.state.lock().await;
@@ -243,6 +251,27 @@ impl ScreenCastInterface {
             session.source_type = requested_types;
             session.output_name = None;
             session.window_id = None;
+            session.persist_mode = persist_mode;
+            session.user_selected = false;
+        }
+
+        // A restore replaces the picker entirely, so it must clear the same bar:
+        // the target has to still exist and be a type this request asked for.
+        if let Some(target) = options
+            .get("restore_data")
+            .and_then(parse_restore_data)
+            .filter(|target| target.source_type() & requested_types != 0)
+        {
+            if restore_target_available(&target) {
+                tracing::info!("restoring previous selection: {target:?}");
+                let mut state = self.state.lock().await;
+                if let Some(session) = state.get_mut(session_handle.as_str()) {
+                    apply_restore_target(session, target);
+                    return Ok((0, select_sources_results()));
+                }
+            } else {
+                tracing::info!("restore target {target:?} is gone; prompting instead");
+            }
         }
 
         #[cfg(feature = "picker")]
@@ -369,7 +398,7 @@ impl ScreenCastInterface {
             .clone()
             .ok_or_else(|| fdo::Error::Failed("no D-Bus connection".into()))?;
 
-        let (source_type, output_name, window_id, cursor_mode) = {
+        let (source_type, output_name, window_id, cursor_mode, persist_mode, user_selected) = {
             let mut sessions = self.state.lock().await;
             let session = sessions.get_mut(session_handle.as_str()).ok_or_else(|| {
                 fdo::Error::Failed(format!("session {} not found", session_handle))
@@ -390,6 +419,8 @@ impl ScreenCastInterface {
                 session.output_name.clone(),
                 session.window_id,
                 session.cursor_mode,
+                session.persist_mode,
+                session.user_selected,
             )
         };
 
@@ -448,6 +479,18 @@ impl ScreenCastInterface {
             stream_properties.insert("size".into(), Value::from((width as i32, height as i32)));
         }
 
+        // Tokens are single use, so every successful Start has to hand back a
+        // fresh one or the app can only restore once. Pickerless mode has no
+        // selection to persist, so it issues none.
+        if persist_mode != 0 && user_selected {
+            if let Some(target) = restore_target(source_type, output_name.as_deref(), window_id) {
+                if let Ok(data) = build_restore_data(&target).try_to_owned() {
+                    results.insert("restore_data".into(), data);
+                    results.insert("persist_mode".into(), OwnedValue::from(persist_mode));
+                }
+            }
+        }
+
         let stream_value: Value<'_> = (node_id, stream_properties).into();
         let mut streams = Array::new(&Signature::from_bytes(b"(ua{sv})").unwrap());
         streams.append(stream_value).unwrap();
@@ -465,6 +508,184 @@ fn value_u32(v: &OwnedValue) -> Option<u32> {
         Value::U32(value) => Some(*value),
         _ => None,
     }
+}
+
+fn value_str(v: &OwnedValue) -> Option<String> {
+    let value: &Value<'_> = v;
+    match value {
+        Value::Str(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn value_u64(v: &OwnedValue) -> Option<u64> {
+    let value: &Value<'_> = v;
+    match value {
+        Value::U64(value) => Some(*value),
+        _ => None,
+    }
+}
+
+/// Vendor tag and private-data version of the `(suv)` restore tuple. The data is
+/// only ours to read, so a foreign vendor or a version we predate is ignored.
+const RESTORE_VENDOR: &str = "niri";
+const RESTORE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestoreTarget {
+    Monitor(String),
+    Window(WindowIdentity),
+}
+
+/// A niri window id is only unique within one compositor session: after a niri
+/// restart the counter starts over, so a stored id can name a different window
+/// than the one the user picked. Identity is the id together with the app id and
+/// title it was granted under, and all three have to still agree before a
+/// restore may stand in for the picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowIdentity {
+    id: u64,
+    app_id: String,
+    title: String,
+}
+
+impl RestoreTarget {
+    fn source_type(&self) -> u32 {
+        match self {
+            RestoreTarget::Monitor(_) => 1,
+            RestoreTarget::Window(_) => 2,
+        }
+    }
+}
+
+/// Portal persistence: 0 none, 1 while the app runs, 2 until explicitly revoked.
+///
+/// Mode 2 outlives the compositor session and would let an app start capturing
+/// with no dialog on a later run, which nobody agreed to in the picker. Grant at
+/// most mode 1 until the picker can ask for more.
+fn grant_persist_mode(requested: Option<u32>) -> u32 {
+    requested.unwrap_or(0).min(1)
+}
+
+/// The private payload arrives as a variant, and a bus round-trip can leave more
+/// than one layer of them. Peel down to the value that carries the data.
+fn unwrap_variant<'a>(value: &'a Value<'a>) -> &'a Value<'a> {
+    let mut current = value;
+    while let Value::Value(inner) = current {
+        current = inner.as_ref();
+    }
+    current
+}
+
+fn parse_restore_data(value: &OwnedValue) -> Option<RestoreTarget> {
+    let value: &Value<'_> = value;
+    let Value::Structure(fields) = value else {
+        return None;
+    };
+    let fields = fields.fields();
+    let (Some(Value::Str(vendor)), Some(Value::U32(version)), Some(private)) =
+        (fields.first(), fields.get(1), fields.get(2))
+    else {
+        return None;
+    };
+    if vendor.as_str() != RESTORE_VENDOR || *version != RESTORE_VERSION {
+        return None;
+    }
+    let private = unwrap_variant(private).try_clone().ok()?;
+    let private = HashMap::<String, OwnedValue>::try_from(private).ok()?;
+    if let Some(name) = private.get("output_name").and_then(value_str) {
+        return Some(RestoreTarget::Monitor(name));
+    }
+    // Partial window data cannot be matched against a live window, so it is
+    // rejected outright rather than restored on the id alone.
+    Some(RestoreTarget::Window(WindowIdentity {
+        id: private.get("window_id").and_then(value_u64)?,
+        app_id: private.get("window_app_id").and_then(value_str)?,
+        title: private.get("window_title").and_then(value_str)?,
+    }))
+}
+
+fn build_restore_data(target: &RestoreTarget) -> Value<'static> {
+    let mut private: HashMap<String, Value<'static>> = HashMap::new();
+    match target {
+        RestoreTarget::Monitor(name) => {
+            private.insert("output_name".into(), Value::from(name.clone()));
+        }
+        RestoreTarget::Window(window) => {
+            private.insert("window_id".into(), Value::from(window.id));
+            private.insert("window_app_id".into(), Value::from(window.app_id.clone()));
+            private.insert("window_title".into(), Value::from(window.title.clone()));
+        }
+    }
+    Value::from((
+        RESTORE_VENDOR.to_string(),
+        RESTORE_VERSION,
+        Value::from(private),
+    ))
+}
+
+fn restore_target(
+    source_type: u32,
+    output_name: Option<&str>,
+    window_id: Option<u64>,
+) -> Option<RestoreTarget> {
+    if source_type & 2 != 0 {
+        // The window is live at this point, so its identity is read back from
+        // niri rather than assumed; without it there is nothing safe to store.
+        return window_id
+            .and_then(window_identity)
+            .map(RestoreTarget::Window);
+    }
+    output_name.map(|name| RestoreTarget::Monitor(name.to_string()))
+}
+
+fn window_identity(id: u64) -> Option<WindowIdentity> {
+    niri_ipc::list_windows()
+        .ok()?
+        .into_iter()
+        .find(|window| window.id == id)
+        .map(|window| WindowIdentity {
+            id,
+            app_id: window.app_id,
+            title: window.title,
+        })
+}
+
+/// Window ids are per compositor session, so a stored one can point at nothing
+/// after a niri restart. The spec calls for prompting normally in that case.
+fn restore_target_available(target: &RestoreTarget) -> bool {
+    match target {
+        RestoreTarget::Monitor(name) => niri_ipc::list_outputs()
+            .map(|outputs| outputs.iter().any(|output| &output.name == name))
+            .unwrap_or(false),
+        RestoreTarget::Window(target) => niri_ipc::list_windows()
+            .map(|windows| windows.iter().any(|window| window_is(window, target)))
+            .unwrap_or(false),
+    }
+}
+
+fn apply_restore_target(session: &mut CaptureSession, target: RestoreTarget) {
+    match target {
+        RestoreTarget::Monitor(name) => {
+            session.source_type = 1;
+            session.output_name = Some(name);
+            session.window_id = None;
+        }
+        RestoreTarget::Window(window) => {
+            session.source_type = 2;
+            session.output_name = None;
+            session.window_id = Some(window.id);
+        }
+    }
+    // A restore stands in for a selection the user made in the picker, so it
+    // carries the same standing to hand back a fresh token.
+    session.user_selected = true;
+}
+
+/// A recycled id is not the window that was picked, so the app id and title have
+/// to match as well.
+fn window_is(window: &niri_ipc::NiriWindow, target: &WindowIdentity) -> bool {
+    window.id == target.id && window.app_id == target.app_id && window.title == target.title
 }
 
 fn normalize_source_types(value: Option<u32>) -> Option<u32> {
@@ -504,6 +725,7 @@ fn apply_picker_choice(session: &mut CaptureSession, choice: pick::PickerChoice)
             session.window_id = Some(id);
         }
     }
+    session.user_selected = true;
 }
 
 async fn start_capture(
@@ -683,6 +905,168 @@ fn positive_size(width: i32, height: i32) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persist_mode_is_granted_at_most_for_the_app_lifetime() {
+        assert_eq!(grant_persist_mode(None), 0);
+        assert_eq!(grant_persist_mode(Some(0)), 0);
+        assert_eq!(grant_persist_mode(Some(1)), 1);
+        // Mode 2 would survive a restart with no dialog; downgrade, never grant.
+        assert_eq!(grant_persist_mode(Some(2)), 1);
+    }
+
+    #[test]
+    fn restore_data_roundtrips_a_monitor() {
+        let target = RestoreTarget::Monitor("DP-1".into());
+        let data = build_restore_data(&target).try_to_owned().unwrap();
+        assert_eq!(parse_restore_data(&data), Some(target));
+    }
+
+    fn window(id: u64) -> WindowIdentity {
+        WindowIdentity {
+            id,
+            app_id: "org.example.App".into(),
+            title: "Notes".into(),
+        }
+    }
+
+    fn live_window(id: u64, app_id: &str, title: &str) -> niri_ipc::NiriWindow {
+        niri_ipc::NiriWindow {
+            id,
+            title: title.into(),
+            app_id: app_id.into(),
+            size: niri_ipc::Size {
+                width: 100,
+                height: 100,
+            },
+        }
+    }
+
+    #[test]
+    fn restore_data_roundtrips_a_window() {
+        let target = RestoreTarget::Window(window(42));
+        let data = build_restore_data(&target).try_to_owned().unwrap();
+        assert_eq!(parse_restore_data(&data), Some(target));
+    }
+
+    #[test]
+    fn restore_data_signature_matches_the_portal_spec() {
+        let data = build_restore_data(&RestoreTarget::Window(window(1)));
+        assert_eq!(data.value_signature().to_string(), "(suv)");
+    }
+
+    #[test]
+    fn restore_data_from_another_backend_is_ignored() {
+        let mut private: HashMap<String, Value<'static>> = HashMap::new();
+        private.insert("output_name".into(), Value::from("DP-1".to_string()));
+        let foreign = Value::from(("GNOME".to_string(), RESTORE_VERSION, Value::from(private)))
+            .try_to_owned()
+            .unwrap();
+        assert_eq!(parse_restore_data(&foreign), None);
+    }
+
+    #[test]
+    fn restore_data_without_window_identity_is_ignored() {
+        // Pre-identity data can only be matched on a recycled id, so it is
+        // rejected and the picker opens instead.
+        let mut private: HashMap<String, Value<'static>> = HashMap::new();
+        private.insert("window_id".into(), Value::from(7u64));
+        let legacy = Value::from((
+            RESTORE_VENDOR.to_string(),
+            RESTORE_VERSION,
+            Value::from(private),
+        ))
+        .try_to_owned()
+        .unwrap();
+        assert_eq!(parse_restore_data(&legacy), None);
+    }
+
+    #[test]
+    fn a_recycled_window_id_is_not_the_window_that_was_picked() {
+        let target = window(5);
+        assert!(window_is(
+            &live_window(5, "org.example.App", "Notes"),
+            &target
+        ));
+        // Same id after a niri restart, different window: prompt, never restore.
+        assert!(!window_is(
+            &live_window(5, "org.other.App", "Notes"),
+            &target
+        ));
+        assert!(!window_is(
+            &live_window(5, "org.example.App", "Inbox"),
+            &target
+        ));
+        assert!(!window_is(
+            &live_window(6, "org.example.App", "Notes"),
+            &target
+        ));
+    }
+
+    #[test]
+    fn restore_data_from_a_future_version_is_ignored() {
+        let mut private: HashMap<String, Value<'static>> = HashMap::new();
+        private.insert("window_id".into(), Value::from(7u64));
+        private.insert(
+            "window_app_id".into(),
+            Value::from("org.example.App".to_string()),
+        );
+        private.insert("window_title".into(), Value::from("Notes".to_string()));
+        let newer = Value::from((
+            RESTORE_VENDOR.to_string(),
+            RESTORE_VERSION + 1,
+            Value::from(private),
+        ))
+        .try_to_owned()
+        .unwrap();
+        assert_eq!(parse_restore_data(&newer), None);
+    }
+
+    #[test]
+    fn restore_target_source_type_gates_against_requested_types() {
+        // A stored window must not be restored into a displays-only request.
+        assert_eq!(RestoreTarget::Window(window(1)).source_type() & 1, 0);
+        assert_eq!(RestoreTarget::Window(window(1)).source_type() & 2, 2);
+        assert_eq!(RestoreTarget::Monitor("DP-1".into()).source_type() & 2, 0);
+        assert_eq!(RestoreTarget::Monitor("DP-1".into()).source_type() & 1, 1);
+    }
+
+    #[test]
+    fn restore_target_stores_the_selected_monitor() {
+        assert_eq!(
+            restore_target(1, Some("DP-1"), None),
+            Some(RestoreTarget::Monitor("DP-1".into()))
+        );
+    }
+
+    #[test]
+    fn restore_target_is_absent_without_a_target() {
+        assert_eq!(restore_target(1, None, None), None);
+        // A window that niri no longer lists has no identity to store.
+        assert_eq!(restore_target(2, None, None), None);
+    }
+
+    #[test]
+    fn applying_a_restore_clears_the_other_target_kind() {
+        let mut session = CaptureSession {
+            state: CaptureState::Created,
+            niri_session_path: None,
+            niri_stream_path: None,
+            cursor_mode: 0,
+            source_type: 3,
+            output_name: Some("DP-1".into()),
+            window_id: None,
+            node_id: 0,
+            persist_mode: 1,
+            user_selected: false,
+        };
+        apply_restore_target(&mut session, RestoreTarget::Window(window(5)));
+        assert_eq!(session.source_type, 2);
+        assert_eq!(session.window_id, Some(5));
+        assert_eq!(session.output_name, None);
+        // A restore replays a picker selection, so it may be persisted again.
+        assert!(session.user_selected);
+    }
 
     #[test]
     fn source_types_use_portal_types_option_semantics() {
