@@ -110,11 +110,7 @@ async fn run_portal() -> anyhow::Result<()> {
     portal_config::ensure_portals_config();
 
     let conn = zbus::connection::Builder::session()?.build().await?;
-    let screencast = screencast::ScreenCastInterface::new(conn.clone());
-
-    conn.object_server()
-        .at("/org/freedesktop/portal/desktop", screencast)
-        .await?;
+    screencast::register(&conn).await?;
 
     conn.request_name("org.freedesktop.impl.portal.desktop.niri")
         .await?;

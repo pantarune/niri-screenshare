@@ -1,5 +1,10 @@
+mod dispatch;
 #[cfg(feature = "picker")]
 mod pick;
+mod request;
+
+#[cfg(test)]
+mod lifecycle_tests;
 
 #[cfg(feature = "picker")]
 pub use pick::{run_picker_process, PickerChoice as DebugPickerChoice};
@@ -7,7 +12,9 @@ pub use pick::{run_picker_process, PickerChoice as DebugPickerChoice};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use futures_util::StreamExt;
+use request::Request;
+use tokio::sync::{watch, Mutex};
 use zbus::fdo;
 use zbus::interface;
 use zbus::zvariant::{Array, ObjectPath, OwnedValue, Signature, Value};
@@ -25,15 +32,17 @@ enum CaptureState {
     Started,
 }
 
-pub struct ScreenCastInterface {
+struct ScreenCastInterface {
     state: Arc<Mutex<HashMap<String, CaptureSession>>>,
-    conn: Option<Connection>,
+    conn: Connection,
+    operations: Mutex<()>,
     #[cfg(feature = "picker")]
     picker: Arc<PickerCoordinator>,
 }
 
 struct CaptureSession {
     state: CaptureState,
+    closed: watch::Sender<bool>,
     niri_session_path: Option<String>,
     niri_stream_path: Option<String>,
     cursor_mode: u32,
@@ -43,10 +52,11 @@ struct CaptureSession {
     node_id: u32,
 }
 
+#[derive(Clone)]
 struct SessionHandler {
     state: Arc<Mutex<HashMap<String, CaptureSession>>>,
     session_id: String,
-    conn: Option<Connection>,
+    conn: Connection,
     #[cfg(feature = "picker")]
     picker: Arc<PickerCoordinator>,
 }
@@ -67,7 +77,7 @@ impl PickerCoordinator {
     }
 
     fn begin(&self, session_id: &str) -> pick::PickerChildSlot {
-        let slot = Arc::new(std::sync::Mutex::new(None));
+        let slot = Arc::new(std::sync::Mutex::new(pick::PickerChild::default()));
         let old = self
             .children
             .lock()
@@ -102,48 +112,88 @@ impl PickerCoordinator {
     }
 }
 
+pub async fn register(conn: &Connection) -> zbus::Result<()> {
+    conn.object_server()
+        .at(
+            "/org/freedesktop/portal/desktop",
+            dispatch::OrderedScreenCast::new(ScreenCastInterface::new(conn.clone())),
+        )
+        .await?;
+    Ok(())
+}
+
 impl ScreenCastInterface {
-    pub fn new(conn: Connection) -> Self {
+    fn new(conn: Connection) -> Self {
         Self {
             state: Arc::new(Mutex::new(HashMap::new())),
-            conn: Some(conn),
+            conn,
+            operations: Mutex::new(()),
             #[cfg(feature = "picker")]
             picker: Arc::new(PickerCoordinator::new()),
+        }
+    }
+
+    fn session_handler(&self, session_id: &str) -> SessionHandler {
+        SessionHandler {
+            state: self.state.clone(),
+            session_id: session_id.to_string(),
+            conn: self.conn.clone(),
+            #[cfg(feature = "picker")]
+            picker: self.picker.clone(),
+        }
+    }
+}
+
+impl SessionHandler {
+    async fn terminate(&self, compositor_closed: bool) {
+        // Removing the state elects a single closer, including when the client
+        // and compositor end the session concurrently.
+        let Some(session) = self.state.lock().await.remove(&self.session_id) else {
+            return;
+        };
+        session.closed.send_replace(true);
+        #[cfg(feature = "picker")]
+        self.picker.cancel(&self.session_id);
+
+        if compositor_closed {
+            match zbus::object_server::SignalEmitter::new(&self.conn, self.session_id.as_str()) {
+                Ok(emitter) => {
+                    if let Err(e) = Self::closed(&emitter).await {
+                        tracing::warn!("failed to emit Session.Closed: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("invalid session signal path: {e}"),
+            }
+        } else if let Some(path) = session.niri_session_path.as_deref() {
+            stop_niri_session(&self.conn, path).await;
+        }
+
+        if let Err(e) = self
+            .conn
+            .object_server()
+            .remove::<SessionHandler, _>(self.session_id.as_str())
+            .await
+        {
+            tracing::debug!("failed to unregister session {}: {e}", self.session_id);
         }
     }
 }
 
 #[interface(name = "org.freedesktop.impl.portal.Session")]
 impl SessionHandler {
-    async fn close(&mut self) -> fdo::Result<()> {
+    #[zbus(property, name = "version")]
+    fn version(&self) -> u32 {
+        1
+    }
+
+    async fn close(&self) -> fdo::Result<()> {
         tracing::info!("Session.Close: session={}", self.session_id);
-        #[cfg(feature = "picker")]
-        self.picker.cancel(&self.session_id);
-
-        let session = self.state.lock().await.remove(&self.session_id);
-        if let (Some(conn), Some(session)) = (&self.conn, session) {
-            if let Some(path) = session.niri_session_path.as_deref() {
-                stop_niri_session(conn, path).await;
-            }
-        }
-
-        // Session objects are one-shot. Remove the D-Bus object after Close so
-        // a long-running portal daemon does not accumulate stale object paths.
-        if let Some(conn) = &self.conn {
-            if let Err(e) = conn
-                .object_server()
-                .remove::<SessionHandler, _>(self.session_id.as_str())
-                .await
-            {
-                tracing::debug!(
-                    "failed to unregister session object {}: {e}",
-                    self.session_id
-                );
-            }
-        }
-
+        self.terminate(false).await;
         Ok(())
     }
+
+    #[zbus(signal)]
+    async fn closed(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 #[interface(name = "org.freedesktop.impl.portal.ScreenCast")]
@@ -166,146 +216,202 @@ impl ScreenCastInterface {
     }
 
     async fn create_session(
-        &mut self,
-        _handle: ObjectPath<'_>,
+        &self,
+        handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         _app_id: &str,
         _options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
         tracing::info!("CreateSession: session={}", session_handle);
-        let sh = session_handle.to_string();
-
-        self.state.lock().await.insert(
-            sh.clone(),
-            CaptureSession {
-                state: CaptureState::Created,
-                niri_session_path: None,
-                niri_stream_path: None,
-                // XDG ScreenCast defaults cursor_mode to Hidden.
-                cursor_mode: 0,
-                source_type: 1,
-                output_name: None,
-                window_id: None,
-                node_id: 0,
-            },
-        );
-
-        if let Some(ref conn) = self.conn {
-            if let Ok(p) = ObjectPath::try_from(sh.as_str()) {
-                match conn
-                    .object_server()
-                    .at(
-                        p,
-                        SessionHandler {
-                            state: self.state.clone(),
-                            session_id: sh.clone(),
-                            conn: self.conn.clone(),
-                            #[cfg(feature = "picker")]
-                            picker: self.picker.clone(),
-                        },
-                    )
-                    .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => tracing::warn!("session path already registered: {sh}"),
-                    Err(e) => tracing::warn!("failed to register session handler: {e}"),
-                }
+        let request = Request::pending(&self.conn, handle).await?;
+        let _operation = self.operations.lock().await;
+        let handler = self.session_handler(session_handle.as_str());
+        let result = async {
+            let mut sessions = self.state.lock().await;
+            if !self
+                .conn
+                .object_server()
+                .at(session_handle.clone(), handler.clone())
+                .await
+                .map_err(|e| fdo::Error::Failed(format!("register session: {e}")))?
+            {
+                return Err(fdo::Error::Failed("session path already registered".into()));
             }
+            sessions.insert(
+                session_handle.to_string(),
+                CaptureSession {
+                    state: CaptureState::Created,
+                    closed: watch::channel(false).0,
+                    niri_session_path: None,
+                    niri_stream_path: None,
+                    // XDG ScreenCast defaults cursor_mode to Hidden.
+                    cursor_mode: 0,
+                    source_type: 1,
+                    output_name: None,
+                    window_id: None,
+                    node_id: 0,
+                },
+            );
+            Ok((0, HashMap::new()))
         }
-
-        Ok((0, HashMap::new()))
+        .await;
+        if request.finish().await {
+            if result.is_ok() {
+                handler.terminate(false).await;
+            }
+            return Ok((1, HashMap::new()));
+        }
+        result
     }
 
     async fn select_sources(
-        &mut self,
-        _request_handle: ObjectPath<'_>,
+        &self,
+        request_handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         _app_id: &str,
         options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
         tracing::info!("SelectSources: session={}", session_handle);
+        let request = Request::pending(&self.conn, request_handle).await?;
+        let _operation = self.operations.lock().await;
+        let result = async {
+            let requested_types = normalize_source_types(options.get("types").and_then(value_u32))
+                .ok_or_else(|| {
+                    fdo::Error::InvalidArgs("no supported source type requested".into())
+                })?;
+            let cursor_niri = portal_cursor_to_niri(options.get("cursor_mode").and_then(value_u32));
 
-        let requested_types = normalize_source_types(options.get("types").and_then(value_u32))
-            .ok_or_else(|| fdo::Error::InvalidArgs("no supported source type requested".into()))?;
-        let cursor_niri = portal_cursor_to_niri(options.get("cursor_mode").and_then(value_u32));
+            #[cfg(feature = "picker")]
+            let mut session_closed;
+            {
+                let mut state = self.state.lock().await;
+                let session = state.get_mut(session_handle.as_str()).ok_or_else(|| {
+                    fdo::Error::Failed(format!("session {} not found", session_handle))
+                })?;
+                if session.state != CaptureState::Created {
+                    return Err(fdo::Error::Failed(
+                        "cannot select sources after Start".into(),
+                    ));
+                }
+                session.cursor_mode = cursor_niri;
+                session.source_type = requested_types;
+                session.output_name = None;
+                session.window_id = None;
+                #[cfg(feature = "picker")]
+                {
+                    session_closed = session.closed.subscribe();
+                }
+            }
 
-        {
+            #[cfg(feature = "picker")]
+            if std::env::var("NIRI_SCREENSHARE_NO_PICKER").is_err() {
+                let outputs = if requested_types & 1 != 0 {
+                    match niri_ipc::list_outputs() {
+                        Ok(outputs) => outputs,
+                        Err(e) => {
+                            tracing::error!("list_outputs failed: {e}");
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                let windows = if requested_types & 2 != 0 {
+                    match niri_ipc::list_windows() {
+                        Ok(windows) => windows,
+                        Err(e) => {
+                            tracing::error!("list_windows failed: {e}");
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                if outputs.is_empty() && windows.is_empty() {
+                    tracing::warn!("SelectSources: no requested capture targets available");
+                    return Ok((2, HashMap::new()));
+                }
+
+                tracing::info!(
+                    "picker targets: {} display(s), {} window(s)",
+                    outputs.len(),
+                    windows.len()
+                );
+
+                let session_id = session_handle.to_string();
+                let child_slot = self.picker.begin(&session_id);
+                let slot_for_task = child_slot.clone();
+                let mut picker_task = tokio::task::spawn_blocking(move || {
+                    pick::show_picker_cancellable(&outputs, &windows, slot_for_task)
+                });
+                let joined = tokio::select! {
+                    biased;
+                    _ = request.cancelled() => {
+                        pick::kill_slotted_picker(&child_slot);
+                        picker_task.await
+                    }
+                    _ = wait_for_session_close(&mut session_closed) => {
+                        pick::kill_slotted_picker(&child_slot);
+                        picker_task.await
+                    }
+                    result = &mut picker_task => result,
+                };
+                self.picker.finish(&session_id, &child_slot);
+
+                let choice =
+                    joined.map_err(|e| fdo::Error::Failed(format!("picker task failed: {e}")))?;
+
+                let mut state = self.state.lock().await;
+                let Some(session) = state.get_mut(session_handle.as_str()) else {
+                    // Session.Close can legitimately race with the picker.
+                    return Ok((1, HashMap::new()));
+                };
+
+                match choice {
+                    Some(choice) => apply_picker_choice(session, choice),
+                    None => {
+                        tracing::info!("SelectSources: user cancelled");
+                        return Ok((1, HashMap::new()));
+                    }
+                }
+
+                tracing::info!(
+                    "cursor={} source={} output={:?} window={:?}",
+                    cursor_niri,
+                    session.source_type,
+                    session.output_name,
+                    session.window_id
+                );
+
+                return Ok((0, select_sources_results()));
+            }
+
+            // Pickerless builds are intentionally conservative: they can auto-pick
+            // a monitor but will not silently choose an arbitrary window.
+            if requested_types & 1 == 0 {
+                tracing::warn!("pickerless mode cannot satisfy a window-only request");
+                return Ok((2, HashMap::new()));
+            }
+
+            let output_name = niri_ipc::focused_output_name().ok().or_else(|| {
+                niri_ipc::list_outputs()
+                    .ok()?
+                    .into_iter()
+                    .next()
+                    .map(|o| o.name)
+            });
+            let Some(output_name) = output_name else {
+                return Ok((2, HashMap::new()));
+            };
+
             let mut state = self.state.lock().await;
             let session = state.get_mut(session_handle.as_str()).ok_or_else(|| {
                 fdo::Error::Failed(format!("session {} not found", session_handle))
             })?;
-            if session.state != CaptureState::Created {
-                return Err(fdo::Error::Failed(
-                    "cannot select sources after Start".into(),
-                ));
-            }
-            session.cursor_mode = cursor_niri;
-            session.source_type = requested_types;
-            session.output_name = None;
+            session.source_type = 1;
+            session.output_name = Some(output_name);
             session.window_id = None;
-        }
-
-        #[cfg(feature = "picker")]
-        if std::env::var("NIRI_SCREENSHARE_NO_PICKER").is_err() {
-            let outputs = if requested_types & 1 != 0 {
-                match niri_ipc::list_outputs() {
-                    Ok(outputs) => outputs,
-                    Err(e) => {
-                        tracing::error!("list_outputs failed: {e}");
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-            let windows = if requested_types & 2 != 0 {
-                match niri_ipc::list_windows() {
-                    Ok(windows) => windows,
-                    Err(e) => {
-                        tracing::error!("list_windows failed: {e}");
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-
-            if outputs.is_empty() && windows.is_empty() {
-                tracing::warn!("SelectSources: no requested capture targets available");
-                return Ok((2, HashMap::new()));
-            }
-
-            tracing::info!(
-                "picker targets: {} display(s), {} window(s)",
-                outputs.len(),
-                windows.len()
-            );
-
-            let session_id = session_handle.to_string();
-            let child_slot = self.picker.begin(&session_id);
-            let slot_for_task = child_slot.clone();
-            let joined = tokio::task::spawn_blocking(move || {
-                pick::show_picker_cancellable(&outputs, &windows, Some(slot_for_task))
-            })
-            .await;
-            self.picker.finish(&session_id, &child_slot);
-
-            let choice =
-                joined.map_err(|e| fdo::Error::Failed(format!("picker task failed: {e}")))?;
-
-            let mut state = self.state.lock().await;
-            let Some(session) = state.get_mut(session_handle.as_str()) else {
-                // Session.Close can legitimately race with the picker.
-                return Ok((1, HashMap::new()));
-            };
-
-            match choice {
-                Some(choice) => apply_picker_choice(session, choice),
-                None => {
-                    tracing::info!("SelectSources: user cancelled");
-                    return Ok((1, HashMap::new()));
-                }
-            }
 
             tracing::info!(
                 "cursor={} source={} output={:?} window={:?}",
@@ -315,147 +421,146 @@ impl ScreenCastInterface {
                 session.window_id
             );
 
-            return Ok((0, select_sources_results()));
+            Ok((0, select_sources_results()))
         }
-
-        // Pickerless builds are intentionally conservative: they can auto-pick
-        // a monitor but will not silently choose an arbitrary window.
-        if requested_types & 1 == 0 {
-            tracing::warn!("pickerless mode cannot satisfy a window-only request");
-            return Ok((2, HashMap::new()));
+        .await;
+        if request.finish().await {
+            return Ok((1, HashMap::new()));
         }
-
-        let output_name = niri_ipc::focused_output_name().ok().or_else(|| {
-            niri_ipc::list_outputs()
-                .ok()?
-                .into_iter()
-                .next()
-                .map(|o| o.name)
-        });
-        let Some(output_name) = output_name else {
-            return Ok((2, HashMap::new()));
-        };
-
-        let mut state = self.state.lock().await;
-        let session = state
-            .get_mut(session_handle.as_str())
-            .ok_or_else(|| fdo::Error::Failed(format!("session {} not found", session_handle)))?;
-        session.source_type = 1;
-        session.output_name = Some(output_name);
-        session.window_id = None;
-
-        tracing::info!(
-            "cursor={} source={} output={:?} window={:?}",
-            cursor_niri,
-            session.source_type,
-            session.output_name,
-            session.window_id
-        );
-
-        Ok((0, select_sources_results()))
+        result
     }
 
     async fn start(
-        &mut self,
-        _request_handle: ObjectPath<'_>,
+        &self,
+        request_handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         _app_id: &str,
         _parent_window: &str,
         _options: HashMap<String, OwnedValue>,
     ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
         tracing::info!("Start: session={}", session_handle);
-        let conn = self
-            .conn
-            .clone()
-            .ok_or_else(|| fdo::Error::Failed("no D-Bus connection".into()))?;
+        let request = Request::pending(&self.conn, request_handle).await?;
+        let _operation = self.operations.lock().await;
+        let handler = self.session_handler(session_handle.as_str());
+        let result = async {
+            let conn = &self.conn;
+            let (source_type, output_name, window_id, cursor_mode, mut session_closed) = {
+                let mut sessions = self.state.lock().await;
+                let session = sessions.get_mut(session_handle.as_str()).ok_or_else(|| {
+                    fdo::Error::Failed(format!("session {} not found", session_handle))
+                })?;
 
-        let (source_type, output_name, window_id, cursor_mode) = {
-            let mut sessions = self.state.lock().await;
-            let session = sessions.get_mut(session_handle.as_str()).ok_or_else(|| {
-                fdo::Error::Failed(format!("session {} not found", session_handle))
-            })?;
-
-            match session.state {
-                CaptureState::Created => session.state = CaptureState::Starting,
-                CaptureState::Starting => {
-                    return Err(fdo::Error::Failed("session is already starting".into()))
-                }
-                CaptureState::Started => {
-                    return Err(fdo::Error::Failed("session already started".into()))
-                }
-            }
-
-            (
-                session.source_type,
-                session.output_name.clone(),
-                session.window_id,
-                session.cursor_mode,
-            )
-        };
-
-        let attempt = start_capture(
-            &conn,
-            source_type,
-            output_name.as_deref(),
-            window_id,
-            cursor_mode,
-        )
-        .await;
-
-        let (niri_session, niri_stream, node_id, size) = match attempt {
-            Ok(value) => value,
-            Err(e) => {
-                if let Some(session) = self.state.lock().await.get_mut(session_handle.as_str()) {
-                    if session.state == CaptureState::Starting {
-                        session.state = CaptureState::Created;
+                match session.state {
+                    CaptureState::Created => session.state = CaptureState::Starting,
+                    CaptureState::Starting => {
+                        return Err(fdo::Error::Failed("session is already starting".into()))
+                    }
+                    CaptureState::Started => {
+                        return Err(fdo::Error::Failed("session already started".into()))
                     }
                 }
-                return Err(fdo::Error::Failed(format!("start: {e}")));
-            }
-        };
 
-        let committed = {
-            let mut sessions = self.state.lock().await;
-            if let Some(session) = sessions.get_mut(session_handle.as_str()) {
-                if session.state == CaptureState::Starting {
-                    session.state = CaptureState::Started;
-                    session.niri_session_path = Some(niri_session.clone());
-                    session.niri_stream_path = Some(niri_stream);
-                    session.node_id = node_id;
-                    true
+                (
+                    session.source_type,
+                    session.output_name.clone(),
+                    session.window_id,
+                    session.cursor_mode,
+                    session.closed.subscribe(),
+                )
+            };
+
+            let attempt = start_capture(
+                conn,
+                source_type,
+                output_name.as_deref(),
+                window_id,
+                cursor_mode,
+                &request,
+                &mut session_closed,
+            )
+            .await;
+
+            let StartedCapture {
+                session_path: niri_session,
+                stream_path: niri_stream,
+                node_id,
+                size,
+                mut closed,
+            } = match attempt {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    handler.terminate(false).await;
+                    return Ok((1, HashMap::new()));
+                }
+                Err(e) => {
+                    if let Some(session) = self.state.lock().await.get_mut(session_handle.as_str())
+                    {
+                        if session.state == CaptureState::Starting {
+                            session.state = CaptureState::Created;
+                        }
+                    }
+                    return Err(fdo::Error::Failed(format!("start: {e}")));
+                }
+            };
+
+            let committed = {
+                let mut sessions = self.state.lock().await;
+                if let Some(session) = sessions.get_mut(session_handle.as_str()) {
+                    if session.state == CaptureState::Starting {
+                        session.state = CaptureState::Started;
+                        session.niri_session_path = Some(niri_session.clone());
+                        session.niri_stream_path = Some(niri_stream);
+                        session.node_id = node_id;
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
-            } else {
-                false
+            };
+
+            if !committed {
+                stop_niri_session(conn, &niri_session).await;
+                return Err(fdo::Error::Failed("session closed while starting".into()));
             }
-        };
 
-        if !committed {
-            stop_niri_session(&conn, &niri_session).await;
-            return Err(fdo::Error::Failed("session closed while starting".into()));
+            let monitor = handler.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_session_close(&mut session_closed) => {}
+                    _ = closed.next() => monitor.terminate(true).await,
+                }
+            });
+
+            tracing::info!("node={} size={:?} type={}", node_id, size, source_type);
+
+            let mut results = HashMap::new();
+            let mut stream_properties: HashMap<String, Value<'_>> = HashMap::new();
+            stream_properties.insert(
+                "source_type".into(),
+                Value::from(if source_type & 2 != 0 { 2u32 } else { 1u32 }),
+            );
+            if let Some((width, height)) = size {
+                stream_properties.insert("size".into(), Value::from((width as i32, height as i32)));
+            }
+
+            let stream_value: Value<'_> = (node_id, stream_properties).into();
+            let mut streams = Array::new(&Signature::from_bytes(b"(ua{sv})").unwrap());
+            streams.append(stream_value).unwrap();
+            results.insert(
+                "streams".into(),
+                Value::Array(streams).try_to_owned().unwrap(),
+            );
+            Ok((0, results))
         }
-
-        tracing::info!("node={} size={:?} type={}", node_id, size, source_type);
-
-        let mut results = HashMap::new();
-        let mut stream_properties: HashMap<String, Value<'_>> = HashMap::new();
-        stream_properties.insert(
-            "source_type".into(),
-            Value::from(if source_type & 2 != 0 { 2u32 } else { 1u32 }),
-        );
-        if let Some((width, height)) = size {
-            stream_properties.insert("size".into(), Value::from((width as i32, height as i32)));
+        .await;
+        if request.finish().await {
+            handler.terminate(false).await;
+            return Ok((1, HashMap::new()));
         }
-
-        let stream_value: Value<'_> = (node_id, stream_properties).into();
-        let mut streams = Array::new(&Signature::from_bytes(b"(ua{sv})").unwrap());
-        streams.append(stream_value).unwrap();
-        results.insert(
-            "streams".into(),
-            Value::Array(streams).try_to_owned().unwrap(),
-        );
-        Ok((0, results))
+        result
     }
 }
 
@@ -506,38 +611,80 @@ fn apply_picker_choice(session: &mut CaptureSession, choice: pick::PickerChoice)
     }
 }
 
+async fn wait_for_session_close(receiver: &mut watch::Receiver<bool>) {
+    let _ = receiver.wait_for(|closed| *closed).await;
+}
+
+struct StartedCapture {
+    session_path: String,
+    stream_path: String,
+    node_id: u32,
+    size: Option<(u32, u32)>,
+    closed: zbus::proxy::SignalStream<'static>,
+}
+
 async fn start_capture(
     conn: &Connection,
     source_type: u32,
     output_name: Option<&str>,
     window_id: Option<u64>,
     cursor_mode: u32,
-) -> anyhow::Result<(String, String, u32, Option<(u32, u32)>)> {
+    request: &Request,
+    session_closed: &mut watch::Receiver<bool>,
+) -> anyhow::Result<Option<StartedCapture>> {
     let niri_session = create_niri_session(conn).await?;
 
     let attempt = async {
-        let (stream, size) = if source_type & 2 != 0 {
-            let window_id = window_id.ok_or_else(|| anyhow::anyhow!("no window selected"))?;
-            let stream = record_niri_window(conn, &niri_session, window_id, cursor_mode).await?;
-            (stream, get_window_size(window_id))
-        } else {
-            let output_name = output_name.ok_or_else(|| anyhow::anyhow!("no output selected"))?;
-            let stream = record_niri_monitor(conn, &niri_session, output_name, cursor_mode).await?;
-            (stream, get_output_size(output_name))
-        };
+        // Subscribe before Start: a short-lived window may close before the
+        // PipeWire node arrives, or immediately after it.
+        let proxy = zbus::Proxy::new(
+            conn,
+            MUTTER_SCREENCAST_DEST,
+            niri_session.as_str(),
+            "org.gnome.Mutter.ScreenCast.Session",
+        )
+        .await?;
+        let mut closed = proxy.receive_signal("Closed").await?;
+        let capture = async {
+            let (stream, size) = if source_type & 2 != 0 {
+                let window_id = window_id.ok_or_else(|| anyhow::anyhow!("no window selected"))?;
+                let stream =
+                    record_niri_window(conn, &niri_session, window_id, cursor_mode).await?;
+                (stream, get_window_size(window_id))
+            } else {
+                let output_name =
+                    output_name.ok_or_else(|| anyhow::anyhow!("no output selected"))?;
+                let stream =
+                    record_niri_monitor(conn, &niri_session, output_name, cursor_mode).await?;
+                (stream, get_output_size(output_name))
+            };
 
-        let node_id = start_and_get_node_id(conn, &niri_session, &stream).await?;
-        Ok::<_, anyhow::Error>((stream, node_id, size))
+            let node_id = start_and_get_node_id(conn, &niri_session, &stream).await?;
+            Ok::<_, anyhow::Error>((stream, node_id, size))
+        };
+        tokio::select! {
+            biased;
+            _ = request.cancelled() => Ok(None),
+            _ = wait_for_session_close(session_closed) => Ok(None),
+            _ = closed.next() => anyhow::bail!("compositor session closed while starting"),
+            result = capture => {
+                let (stream_path, node_id, size) = result?;
+                Ok(Some(StartedCapture {
+                    session_path: niri_session.clone(),
+                    stream_path,
+                    node_id,
+                    size,
+                    closed,
+                }))
+            }
+        }
     }
     .await;
 
-    match attempt {
-        Ok((stream, node_id, size)) => Ok((niri_session, stream, node_id, size)),
-        Err(e) => {
-            stop_niri_session(conn, &niri_session).await;
-            Err(e)
-        }
+    if !matches!(attempt, Ok(Some(_))) {
+        stop_niri_session(conn, &niri_session).await;
     }
+    attempt
 }
 
 async fn stop_niri_session(conn: &Connection, session_path: &str) {

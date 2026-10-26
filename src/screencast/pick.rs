@@ -44,13 +44,19 @@ struct WindowItem {
     height: i32,
 }
 
-/// Holds the picker child so Session.Close can kill it on cancel/retry.
-pub type PickerChildSlot = Arc<std::sync::Mutex<Option<std::process::Child>>>;
+/// Cancellation is sticky even if Close arrives before the child is spawned.
+#[derive(Default)]
+pub struct PickerChild {
+    child: Option<std::process::Child>,
+    cancelled: bool,
+}
+
+pub type PickerChildSlot = Arc<std::sync::Mutex<PickerChild>>;
 
 pub fn show_picker_cancellable(
     outputs: &[NiriOutput],
     windows: &[NiriWindow],
-    child_slot: Option<PickerChildSlot>,
+    child_slot: PickerChildSlot,
 ) -> Option<PickerChoice> {
     let displays: Vec<DisplayItem> = outputs.iter().map(DisplayItem::from).collect();
     let wins: Vec<WindowItem> = windows.iter().map(WindowItem::from).collect();
@@ -59,80 +65,70 @@ pub fn show_picker_cancellable(
         return None;
     }
 
-    // Even when only one target exists, screen capture still crosses a permission
-    // boundary. Never turn "one possible target" into implicit user consent.
-    let bin = picker_bin();
-    let mut child = match Command::new(&bin)
-        .arg("--picker")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("failed to spawn picker {}: {e}", bin.display());
+    // Serialize spawning with cancellation so a closed request cannot leave a
+    // newly spawned chooser behind. Release the lock before writing its input.
+    let (stdin, stdout) = {
+        let mut slot = child_slot.lock().ok()?;
+        if slot.cancelled {
             return None;
         }
+        // Even one possible target still requires explicit user consent.
+        let bin = picker_bin();
+        let mut child = match Command::new(&bin)
+            .arg("--picker")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                tracing::error!("failed to spawn picker {}: {e}", bin.display());
+                return None;
+            }
+        };
+        let pipes = (child.stdin.take(), child.stdout.take());
+        slot.child = Some(child);
+        pipes
     };
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = stdin {
         if let Err(e) = write_picker_targets(&mut stdin, &displays, &wins) {
             tracing::error!("failed to write picker targets: {e}");
-            let _ = child.kill();
+            kill_slotted_picker(&child_slot);
             return None;
         }
     }
 
-    let stdout = child.stdout.take();
-
-    let status = if let Some(slot) = &child_slot {
-        if let Ok(mut guard) = slot.lock() {
-            if let Some(mut old) = guard.take() {
-                let _ = old.kill();
-                let _ = old.wait();
-            }
-            *guard = Some(child);
-        }
-
-        loop {
-            let finished = {
-                let mut guard = slot.lock().ok();
-                match guard.as_mut().and_then(|g| g.as_mut()) {
-                    Some(c) => match c.try_wait() {
-                        Ok(Some(status)) => Some(Ok(status)),
-                        Ok(None) => None,
-                        Err(e) => Some(Err(e)),
-                    },
-                    None => Some(Err(std::io::Error::other("picker killed"))),
+    let status = loop {
+        let finished = {
+            let mut slot = child_slot.lock().ok()?;
+            let child = slot.child.as_mut()?;
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    slot.child.take();
+                    Some(Ok(status))
                 }
-            };
-            match finished {
-                Some(result) => break result,
-                None => std::thread::sleep(Duration::from_millis(50)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
             }
+        };
+        match finished {
+            Some(result) => break result,
+            None => std::thread::sleep(Duration::from_millis(50)),
         }
-    } else {
-        child.wait()
     };
-
-    if let Some(slot) = &child_slot {
-        if let Ok(mut guard) = slot.lock() {
-            if let Some(mut c) = guard.take() {
-                let _ = c.wait();
-            }
-        }
-    }
 
     let status = match status {
-        Ok(s) => s,
+        Ok(status) => status,
         Err(e) => {
             tracing::info!("picker wait ended: {e}");
+            kill_slotted_picker(&child_slot);
             return None;
         }
     };
 
-    if !status.success() {
+    if !status.success() || child_slot.lock().ok()?.cancelled {
         tracing::info!("picker exited with {status}");
         return None;
     }
@@ -153,8 +149,9 @@ pub fn show_picker_cancellable(
 }
 
 pub fn kill_slotted_picker(slot: &PickerChildSlot) {
-    if let Ok(mut guard) = slot.lock() {
-        if let Some(mut child) = guard.take() {
+    if let Ok(mut slot) = slot.lock() {
+        slot.cancelled = true;
+        if let Some(mut child) = slot.child.take() {
             tracing::info!("killing in-flight picker pid={}", child.id());
             let _ = child.kill();
             let _ = child.wait();

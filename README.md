@@ -115,8 +115,16 @@ app → xdg-desktop-portal → niri-screenshare → Mutter.ScreenCast → PipeWi
 5. the PipeWire node id is returned to xdg-desktop-portal
 6. xdg-desktop-portal exposes the appropriate PipeWire remote to the app
 
-Failed starts are cleaned up and may be retried; closing a portal session also
-stops the corresponding compositor screencast session.
+Pending calls export `org.freedesktop.impl.portal.Request`. An application's
+`Request.Close` cancels its chooser or in-flight capture startup, including when
+cancellation arrives immediately after the request. Clicking Cancel in the
+chooser also returns the portal's cancelled response.
+
+Failed starts are cleaned up and may be retried. Closing a portal session stops
+the corresponding compositor screencast session. If the compositor ends the
+session, for example when a captured window closes, the backend emits
+`org.freedesktop.impl.portal.Session.Closed` and removes the session object.
+Session objects expose the standard `version` property.
 
 ## dependencies
 
@@ -125,6 +133,10 @@ stops the corresponding compositor screencast session.
 
 The AUR binary package does **not** require the Rust toolchain. GTK4/libadwaita
 are not needed by a `--no-default-features` source build.
+
+The test suite also requires `dbus-daemon`. Its lifecycle regression tests create
+private buses and a controlled compositor service; they do not use the desktop's
+session bus or start a real screen capture.
 
 ## troubleshooting
 
