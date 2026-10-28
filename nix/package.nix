@@ -5,6 +5,7 @@
   wrapGAppsHook4,
   gtk4,
   libadwaita,
+  dbus,
   withPicker ? true,
 }:
 
@@ -26,6 +27,13 @@ rustPlatform.buildRustPackage {
 
   buildNoDefaultFeatures = !withPicker;
   buildFeatures = lib.optional withPicker "picker";
+
+  nativeCheckInputs = [ dbus ];
+
+  postPatch = ''
+    substituteInPlace src/screencast/lifecycle_tests.rs \
+      --replace-fail '"--session"' '"--config-file=${dbus}/share/dbus-1/session.conf"'
+  '';
 
   nativeBuildInputs = lib.optionals withPicker [
     pkg-config
