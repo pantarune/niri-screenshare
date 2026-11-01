@@ -33,6 +33,8 @@ enum CaptureState {
 }
 
 struct ScreenCastInterface {
+    dynamic_cast: bool,
+    auto_select_monitor: bool,
     state: Arc<Mutex<HashMap<String, CaptureSession>>>,
     conn: Connection,
     operations: Mutex<()>,
@@ -46,9 +48,7 @@ struct CaptureSession {
     niri_session_path: Option<String>,
     niri_stream_path: Option<String>,
     cursor_mode: u32,
-    source_type: u32,
-    output_name: Option<String>,
-    window_id: Option<u64>,
+    target: Option<CaptureTarget>,
     node_id: u32,
 }
 
@@ -125,6 +125,9 @@ pub async fn register(conn: &Connection) -> zbus::Result<()> {
 impl ScreenCastInterface {
     fn new(conn: Connection) -> Self {
         Self {
+            dynamic_cast: std::env::var("NIRI_SCREENSHARE_DYNAMIC_CAST").is_ok_and(|v| v == "1"),
+            auto_select_monitor: std::env::var("NIRI_SCREENSHARE_DYNAMIC_CAST_AUTO_SELECT_MONITOR")
+                .is_ok_and(|v| v == "1"),
             state: Arc::new(Mutex::new(HashMap::new())),
             conn,
             operations: Mutex::new(()),
@@ -207,7 +210,11 @@ impl ScreenCastInterface {
 
     #[zbus(property)]
     fn available_source_types(&self) -> u32 {
-        3
+        if self.dynamic_cast {
+            2
+        } else {
+            3
+        }
     }
 
     #[zbus(property)]
@@ -246,9 +253,7 @@ impl ScreenCastInterface {
                     niri_stream_path: None,
                     // XDG ScreenCast defaults cursor_mode to Hidden.
                     cursor_mode: 0,
-                    source_type: 1,
-                    output_name: None,
-                    window_id: None,
+                    target: None,
                     node_id: 0,
                 },
             );
@@ -294,9 +299,14 @@ impl ScreenCastInterface {
                     ));
                 }
                 session.cursor_mode = cursor_niri;
-                session.source_type = requested_types;
-                session.output_name = None;
-                session.window_id = None;
+                session.target = None;
+                if self.dynamic_cast {
+                    if requested_types & 2 == 0 {
+                        return Ok((2, HashMap::new()));
+                    }
+                    session.target = Some(CaptureTarget::Dynamic);
+                    return Ok((0, select_sources_results(self.available_source_types())));
+                }
                 #[cfg(feature = "picker")]
                 {
                     session_closed = session.closed.subscribe();
@@ -368,23 +378,18 @@ impl ScreenCastInterface {
                     return Ok((1, HashMap::new()));
                 };
 
-                match choice {
-                    Some(choice) => apply_picker_choice(session, choice),
+                session.target = Some(match choice {
+                    Some(pick::PickerChoice::Monitor(name)) => CaptureTarget::Monitor(name),
+                    Some(pick::PickerChoice::Window(id)) => CaptureTarget::Window(id),
                     None => {
                         tracing::info!("SelectSources: user cancelled");
                         return Ok((1, HashMap::new()));
                     }
-                }
+                });
 
-                tracing::info!(
-                    "cursor={} source={} output={:?} window={:?}",
-                    cursor_niri,
-                    session.source_type,
-                    session.output_name,
-                    session.window_id
-                );
+                tracing::info!(cursor = cursor_niri, target = ?session.target);
 
-                return Ok((0, select_sources_results()));
+                return Ok((0, select_sources_results(self.available_source_types())));
             }
 
             // Pickerless builds are intentionally conservative: they can auto-pick
@@ -409,19 +414,11 @@ impl ScreenCastInterface {
             let session = state.get_mut(session_handle.as_str()).ok_or_else(|| {
                 fdo::Error::Failed(format!("session {} not found", session_handle))
             })?;
-            session.source_type = 1;
-            session.output_name = Some(output_name);
-            session.window_id = None;
+            session.target = Some(CaptureTarget::Monitor(output_name));
 
-            tracing::info!(
-                "cursor={} source={} output={:?} window={:?}",
-                cursor_niri,
-                session.source_type,
-                session.output_name,
-                session.window_id
-            );
+            tracing::info!(cursor = cursor_niri, target = ?session.target);
 
-            Ok((0, select_sources_results()))
+            Ok((0, select_sources_results(self.available_source_types())))
         }
         .await;
         if request.finish().await {
@@ -444,11 +441,15 @@ impl ScreenCastInterface {
         let handler = self.session_handler(session_handle.as_str());
         let result = async {
             let conn = &self.conn;
-            let (source_type, output_name, window_id, cursor_mode, mut session_closed) = {
+            let (target, cursor_mode, mut session_closed) = {
                 let mut sessions = self.state.lock().await;
                 let session = sessions.get_mut(session_handle.as_str()).ok_or_else(|| {
                     fdo::Error::Failed(format!("session {} not found", session_handle))
                 })?;
+                let target = session
+                    .target
+                    .clone()
+                    .ok_or_else(|| fdo::Error::Failed("no source selected".into()))?;
 
                 match session.state {
                     CaptureState::Created => session.state = CaptureState::Starting,
@@ -460,21 +461,17 @@ impl ScreenCastInterface {
                     }
                 }
 
-                (
-                    session.source_type,
-                    session.output_name.clone(),
-                    session.window_id,
-                    session.cursor_mode,
-                    session.closed.subscribe(),
-                )
+                (target, session.cursor_mode, session.closed.subscribe())
             };
+            // A dynamic stream can wait indefinitely for user selection. Other
+            // sessions must remain usable while this one is starting.
+            drop(_operation);
 
             let attempt = start_capture(
                 conn,
-                source_type,
-                output_name.as_deref(),
-                window_id,
+                &target,
                 cursor_mode,
+                self.auto_select_monitor,
                 &request,
                 &mut session_closed,
             )
@@ -534,13 +531,17 @@ impl ScreenCastInterface {
                 }
             });
 
-            tracing::info!("node={} size={:?} type={}", node_id, size, source_type);
+            tracing::info!("node={} size={:?} target={:?}", node_id, size, target);
 
             let mut results = HashMap::new();
             let mut stream_properties: HashMap<String, Value<'_>> = HashMap::new();
             stream_properties.insert(
                 "source_type".into(),
-                Value::from(if source_type & 2 != 0 { 2u32 } else { 1u32 }),
+                Value::from(if matches!(target, CaptureTarget::Monitor(_)) {
+                    1u32
+                } else {
+                    2u32
+                }),
             );
             if let Some((width, height)) = size {
                 stream_properties.insert("size".into(), Value::from((width as i32, height as i32)));
@@ -588,27 +589,14 @@ fn portal_cursor_to_niri(value: Option<u32>) -> u32 {
     }
 }
 
-fn select_sources_results() -> HashMap<String, OwnedValue> {
+fn select_sources_results(source_types: u32) -> HashMap<String, OwnedValue> {
     let mut results = HashMap::new();
-    results.insert("available_source_types".into(), OwnedValue::from(3u32));
+    results.insert(
+        "available_source_types".into(),
+        OwnedValue::from(source_types),
+    );
     results.insert("available_cursor_modes".into(), OwnedValue::from(7u32));
     results
-}
-
-#[cfg(feature = "picker")]
-fn apply_picker_choice(session: &mut CaptureSession, choice: pick::PickerChoice) {
-    match choice {
-        pick::PickerChoice::Monitor(name) => {
-            session.source_type = 1;
-            session.output_name = Some(name);
-            session.window_id = None;
-        }
-        pick::PickerChoice::Window(id) => {
-            session.source_type = 2;
-            session.output_name = None;
-            session.window_id = Some(id);
-        }
-    }
 }
 
 async fn wait_for_session_close(receiver: &mut watch::Receiver<bool>) {
@@ -623,12 +611,19 @@ struct StartedCapture {
     closed: zbus::proxy::SignalStream<'static>,
 }
 
+#[derive(Debug, Clone)]
+enum CaptureTarget {
+    Monitor(String),
+    #[cfg_attr(not(feature = "picker"), expect(dead_code))]
+    Window(u64),
+    Dynamic,
+}
+
 async fn start_capture(
     conn: &Connection,
-    source_type: u32,
-    output_name: Option<&str>,
-    window_id: Option<u64>,
+    target: &CaptureTarget,
     cursor_mode: u32,
+    auto_select_monitor: bool,
     request: &Request,
     session_closed: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<Option<StartedCapture>> {
@@ -646,20 +641,32 @@ async fn start_capture(
         .await?;
         let mut closed = proxy.receive_signal("Closed").await?;
         let capture = async {
-            let (stream, size) = if source_type & 2 != 0 {
-                let window_id = window_id.ok_or_else(|| anyhow::anyhow!("no window selected"))?;
-                let stream =
-                    record_niri_window(conn, &niri_session, window_id, cursor_mode).await?;
-                (stream, get_window_size(window_id))
-            } else {
-                let output_name =
-                    output_name.ok_or_else(|| anyhow::anyhow!("no output selected"))?;
-                let stream =
-                    record_niri_monitor(conn, &niri_session, output_name, cursor_mode).await?;
-                (stream, get_output_size(output_name))
+            let (stream, size) = match target {
+                CaptureTarget::Dynamic => {
+                    let id = dynamic_cast_window(conn).await?;
+                    let stream = record_niri_window(conn, &niri_session, id, cursor_mode).await?;
+                    (stream, None)
+                }
+                CaptureTarget::Window(window_id) => {
+                    let stream =
+                        record_niri_window(conn, &niri_session, *window_id, cursor_mode).await?;
+                    (stream, get_window_size(*window_id))
+                }
+                CaptureTarget::Monitor(output_name) => {
+                    let stream =
+                        record_niri_monitor(conn, &niri_session, output_name, cursor_mode).await?;
+                    (stream, get_output_size(output_name))
+                }
             };
 
-            let node_id = start_and_get_node_id(conn, &niri_session, &stream).await?;
+            let node_id = start_and_get_node_id(
+                conn,
+                &niri_session,
+                &stream,
+                matches!(target, CaptureTarget::Dynamic),
+                auto_select_monitor,
+            )
+            .await?;
             Ok::<_, anyhow::Error>((stream, node_id, size))
         };
         tokio::select! {
@@ -762,10 +769,39 @@ async fn record_niri_window(
     Ok(path.as_str().to_string())
 }
 
+async fn dynamic_cast_window(conn: &Connection) -> anyhow::Result<u64> {
+    let reply = conn
+        .call_method(
+            Some("org.gnome.Shell.Introspect"),
+            "/org/gnome/Shell/Introspect",
+            Some("org.gnome.Shell.Introspect"),
+            "GetWindows",
+            &(),
+        )
+        .await?;
+    let windows: HashMap<u64, HashMap<String, OwnedValue>> = reply.body().deserialize()?;
+    let mut matches = windows.into_iter().filter_map(|(id, props)| {
+        let title = props.get("title").and_then(|v| <&str>::try_from(v).ok());
+        let app_id = props.get("app-id").and_then(|v| <&str>::try_from(v).ok());
+        (title == Some("niri Dynamic Cast Target") && app_id == Some("rs.bxt.niri.desktop"))
+            .then_some(id)
+    });
+    let id = matches
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Niri Dynamic Cast Target is unavailable"))?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "ambiguous Niri Dynamic Cast Target"
+    );
+    Ok(id)
+}
+
 async fn start_and_get_node_id(
     conn: &Connection,
     session_path: &str,
     stream_path: &str,
+    dynamic_cast: bool,
+    auto_select_monitor: bool,
 ) -> anyhow::Result<u32> {
     use futures_util::StreamExt;
     use tokio::time::timeout;
@@ -789,13 +825,32 @@ async fn start_and_get_node_id(
     )
     .await?;
 
-    match timeout(std::time::Duration::from_secs(10), signal.next()).await {
-        Ok(Some(msg)) => {
+    if dynamic_cast && auto_select_monitor {
+        // Start queues the pending cast before returning. Niri runs IPC actions
+        // at idle, after queued compositor events, so selection must follow Start.
+        timeout(
+            std::time::Duration::from_secs(10),
+            niri_ipc::set_dynamic_cast_monitor(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout selecting the dynamic cast monitor"))??;
+    }
+
+    // Niri does not publish a dynamic stream until the user chooses its first
+    // target. The outer capture select still handles request/session closure.
+    let node = if dynamic_cast && !auto_select_monitor {
+        signal.next().await
+    } else {
+        timeout(std::time::Duration::from_secs(10), signal.next())
+            .await
+            .map_err(|_| anyhow::anyhow!("timeout waiting for PipeWire node"))?
+    };
+    match node {
+        Some(msg) => {
             let (node_id,): (u32,) = msg.body().deserialize()?;
             Ok(node_id)
         }
-        Ok(None) => anyhow::bail!("signal stream ended"),
-        Err(_) => anyhow::bail!("timeout waiting for PipeWire node"),
+        None => anyhow::bail!("signal stream ended"),
     }
 }
 

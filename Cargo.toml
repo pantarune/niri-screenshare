@@ -15,7 +15,7 @@ picker = ["dep:gtk4", "dep:libadwaita"]
 
 [dependencies]
 zbus = { version = "5.18", features = ["tokio"] }
-tokio = { version = "1", features = ["rt", "macros", "time", "sync", "rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "rt-multi-thread", "process"] }
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.3"

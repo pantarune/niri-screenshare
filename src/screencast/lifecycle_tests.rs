@@ -184,12 +184,8 @@ impl Fixture {
         assert_eq!(response.0, 0);
         // This fixture exercises Start and lifecycle independently of a GUI or
         // real compositor; seed the target normally supplied by SelectSources.
-        self.sessions
-            .lock()
-            .await
-            .get_mut(SESSION)
-            .unwrap()
-            .output_name = Some("TEST-OUTPUT".into());
+        self.sessions.lock().await.get_mut(SESSION).unwrap().target =
+            Some(CaptureTarget::Monitor("TEST-OUTPUT".into()));
     }
 
     fn start(&self) -> tokio::task::JoinHandle<Response> {

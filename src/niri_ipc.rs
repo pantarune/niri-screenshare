@@ -130,6 +130,20 @@ pub fn focused_output_name() -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("no name field in output"))
 }
 
+pub async fn set_dynamic_cast_monitor() -> anyhow::Result<()> {
+    let output = tokio::process::Command::from(niri_command())
+        .args(["msg", "action", "set-dynamic-cast-monitor"])
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "set-dynamic-cast-monitor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 fn parse_outputs(raw: &str) -> anyhow::Result<Vec<NiriOutput>> {
     #[derive(Deserialize)]
     struct OutputRaw {

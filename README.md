@@ -64,6 +64,19 @@ Set `NIRI_SCREENSHARE_NO_PICKER=1` to skip the dialog. Pickerless mode currently
 auto-selects the focused output and therefore supports monitor capture only; it
 does **not** claim to implement niri's synthetic Dynamic Cast Target.
 
+Dynamic casting requires the app to request window sources, as with the dynamic
+target in the GNOME picker. Select or switch the target with
+`niri msg action set-dynamic-cast-window` or
+`niri msg action set-dynamic-cast-monitor`. `clear-dynamic-cast-target` blanks
+the stream. All dynamic streams share one target. Each new stream waits for a
+fresh selection.
+NixOS users can set `services.niri-screenshare.dynamicCast = true`.
+
+Set `NIRI_SCREENSHARE_DYNAMIC_CAST_AUTO_SELECT_MONITOR=1` to start dynamic casts
+on the focused monitor. Each new share also switches existing dynamic streams
+to that monitor. On NixOS, set
+`services.niri-screenshare.dynamicCastAutoSelectMonitor = true`.
+
 | build | behavior |
 |-------|----------|
 | `default` | GTK4 picker dialog for requested displays/windows |
@@ -74,6 +87,7 @@ does **not** claim to implement niri's synthetic Dynamic Cast Target.
 | variable | effect |
 |----------|--------|
 | `NIRI_SCREENSHARE_NO_PICKER=1` | skip picker and auto-select the focused output |
+| `NIRI_SCREENSHARE_DYNAMIC_CAST=1` | bypass picker and use Niri's Dynamic Cast Target |
 | `NIRI_BIN=/path/to/niri` | override niri binary path (for NixOS etc.) |
 | `NIRI_SOCKET=/path/to/socket` | explicitly select the niri IPC socket |
 
