@@ -86,11 +86,6 @@ jobs:
           AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
-        shell: bash
-        env:
-          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-        run: |
           set -euo pipefail
           key="$RUNNER_TEMP/aur_key"
           raw="$AUR_SSH_PRIVATE_KEY"
