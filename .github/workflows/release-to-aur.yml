@@ -1,0 +1,138 @@
+name: Release to AUR (one click)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-to-aur
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Calculate next patch version
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current="$(sed -n 's/^pkgver=//p' contrib/PKGBUILD)"
+          IFS=. read -r major minor patch <<< "$current"
+          next="$major.$minor.$((patch + 1))"
+          if gh release view "v$next" >/dev/null 2>&1; then
+            echo "::error::Release v$next already exists"
+            exit 1
+          fi
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+      - name: Build and archive precompiled binary
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          mkdir -p dist
+          tar -C target/release -czf "dist/niri-screenshare-${RELEASE_TAG}-linux-x86_64.tar.gz" niri-screenshare
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+      - name: Generate matching AUR metadata
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, re, hashlib
+          v = os.environ['VERSION']
+          tag = os.environ['RELEASE_TAG']
+          archive = pathlib.Path(f'dist/niri-screenshare-{tag}-linux-x86_64.tar.gz')
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          pkg = pathlib.Path('contrib/PKGBUILD')
+          content = pkg.read_text()
+          content = re.sub(r'^pkgver=.*$', f'pkgver={v}', content, flags=re.M)
+          content = re.sub(r'^pkgrel=.*$', 'pkgrel=1', content, flags=re.M)
+          content = re.sub(r"^sha256sums=\('[0-9a-f]{64}'\)", f"sha256sums=('{digest}')", content, flags=re.M)
+          if f"sha256sums=('{digest}')" not in content:
+              raise SystemExit('Could not update PKGBUILD checksum')
+          pkg.write_text(content)
+          src = pathlib.Path('contrib/.SRCINFO')
+          info = src.read_text()
+          info = re.sub(r'^\s*pkgver = .*$', f'\tpkgver = {v}', info, count=1, flags=re.M)
+          info = re.sub(r'^\s*pkgrel = .*$', '\tpkgrel = 1', info, count=1, flags=re.M)
+          info = re.sub(r'^\s*source = .*$', f'\tsource = niri-screenshare-{tag}-linux-x86_64.tar.gz::https://github.com/pantarune/niri-screenshare/releases/download/{tag}/niri-screenshare-{tag}-linux-x86_64.tar.gz', info, count=1, flags=re.M)
+          info = re.sub(r'^\s*sha256sums = .*$', f'\tsha256sums = {digest}', info, count=1, flags=re.M)
+          src.write_text(info)
+          print(f'Prepared AUR {v}-1 with SHA-256 {digest}')
+          PY
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" dist/* --target "$GITHUB_SHA" --title "niri-screenshare $RELEASE_TAG" --generate-notes
+      - name: Push to AUR
+        shell: bash
+        env:
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+        shell: bash
+        env:
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/aur_key"
+          raw="$AUR_SSH_PRIVATE_KEY"
+          raw="${raw#\"}"
+          raw="${raw%\"}"
+        
+          printf '%b' "$raw" | tr -d '\r' > "$key"
+          chmod 600 "$key"
+          if ! ssh-keygen -y -f "$key" >/dev/null 2>&1; then
+            printf '%s' "$raw" | tr -d '\r\n ' | base64 -d > "$key" 2>/dev/null || true
+            chmod 600 "$key"
+          fi
+          if ! ssh-keygen -y -f "$key" >/dev/null 2>&1; then
+            echo '::error::AUR_SSH_PRIVATE_KEY is not a parseable unencrypted SSH private key'
+            exit 1
+          fi
+        
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+        
+          git clone ssh://aur@aur.archlinux.org/niri-screenshare.git "$RUNNER_TEMP/aur-repo"
+          cp contrib/PKGBUILD "$RUNNER_TEMP/aur-repo/PKGBUILD"
+          cp contrib/.SRCINFO "$RUNNER_TEMP/aur-repo/.SRCINFO"
+          cd "$RUNNER_TEMP/aur-repo"
+          git config user.name "${AUR_USERNAME:-pantarune}"
+          git config user.email '176167047+pantarune@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo 'AUR already has this package metadata'
+            exit 0
+          fi
+          pkgver="$(sed -n 's/^pkgver=//p' PKGBUILD)"
+          git commit -m "Update to ${pkgver}"
+          git push origin HEAD:master
+      - name: Commit package metadata to main
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add contrib/PKGBUILD contrib/.SRCINFO
+          git commit -m "packaging: release ${{ steps.version.outputs.version }} to AUR"
+          git push origin HEAD:main
