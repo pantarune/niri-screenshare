@@ -20,6 +20,15 @@ pub struct NiriWindow {
     pub title: String,
     pub app_id: String,
     pub size: Size,
+    pub workspace_id: Option<u64>,
+}
+
+#[cfg_attr(not(feature = "picker"), allow(dead_code))]
+pub struct NiriWorkspace {
+    pub id: u64,
+    pub idx: u32,
+    pub name: Option<String>,
+    pub output: Option<String>,
 }
 
 fn niri_command() -> Command {
@@ -109,6 +118,21 @@ pub fn list_windows() -> anyhow::Result<Vec<NiriWindow>> {
     parse_windows(&raw)
 }
 
+#[cfg_attr(not(feature = "picker"), allow(dead_code))]
+pub fn list_workspaces() -> anyhow::Result<Vec<NiriWorkspace>> {
+    let out = niri_command()
+        .args(["msg", "--json", "workspaces"])
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "niri msg workspaces failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let raw = String::from_utf8(out.stdout)?;
+    parse_workspaces(&raw)
+}
+
 pub fn focused_output_name() -> anyhow::Result<String> {
     let out = niri_command()
         .args(["msg", "--json", "focused-output"])
@@ -178,6 +202,7 @@ fn parse_windows(raw: &str) -> anyhow::Result<Vec<NiriWindow>> {
         id: u64,
         title: Option<String>,
         app_id: Option<String>,
+        workspace_id: Option<u64>,
         layout: Option<LayoutRaw>,
     }
     #[derive(Deserialize)]
@@ -198,10 +223,32 @@ fn parse_windows(raw: &str) -> anyhow::Result<Vec<NiriWindow>> {
                     width: *size.first()?,
                     height: *size.get(1)?,
                 },
+                workspace_id: w.workspace_id,
             })
         })
         .collect();
     Ok(windows)
+}
+
+#[cfg_attr(not(feature = "picker"), allow(dead_code))]
+fn parse_workspaces(raw: &str) -> anyhow::Result<Vec<NiriWorkspace>> {
+    #[derive(Deserialize)]
+    struct WorkspaceRaw {
+        id: u64,
+        idx: u32,
+        name: Option<String>,
+        output: Option<String>,
+    }
+    let workspaces: Vec<WorkspaceRaw> = serde_json::from_str(raw)?;
+    Ok(workspaces
+        .into_iter()
+        .map(|w| NiriWorkspace {
+            id: w.id,
+            idx: w.idx,
+            name: w.name,
+            output: w.output,
+        })
+        .collect())
 }
 
 #[allow(dead_code)]
@@ -271,6 +318,33 @@ mod tests {
     fn parse_windows_skips_without_layout() {
         let raw = r#"[{"id": 7, "title": "no layout"}]"#;
         assert!(parse_windows(raw).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_windows_reads_workspace_id() {
+        let raw = r#"[
+            {"id": 1, "workspace_id": 3, "layout": {"window_size": [100, 100]}},
+            {"id": 2, "workspace_id": null, "layout": {"window_size": [100, 100]}}
+        ]"#;
+        let windows = parse_windows(raw).unwrap();
+        assert_eq!(windows[0].workspace_id, Some(3));
+        assert_eq!(windows[1].workspace_id, None);
+    }
+
+    #[test]
+    fn parse_workspaces_basic() {
+        let raw = r#"[
+            {"id": 3, "idx": 2, "name": null, "output": "DP-1", "is_active": true},
+            {"id": 5, "idx": 1, "name": "web", "output": null}
+        ]"#;
+        let workspaces = parse_workspaces(raw).unwrap();
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0].id, 3);
+        assert_eq!(workspaces[0].idx, 2);
+        assert_eq!(workspaces[0].name, None);
+        assert_eq!(workspaces[0].output.as_deref(), Some("DP-1"));
+        assert_eq!(workspaces[1].name.as_deref(), Some("web"));
+        assert_eq!(workspaces[1].output, None);
     }
 
     #[test]

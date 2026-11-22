@@ -11,14 +11,15 @@ use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, Label, ListBox, Orientation,
-    PolicyType, ScrolledWindow, SelectionMode, STYLE_PROVIDER_PRIORITY_APPLICATION,
+    Align, Application, ApplicationWindow, Box as GtkBox, CssProvider, IconTheme, Image, Label,
+    ListBox, Orientation, PolicyType, ScrolledWindow, SelectionMode,
+    STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 #[allow(unused_imports)]
 use libadwaita::prelude::*;
 use libadwaita::{ActionRow, HeaderBar, ViewStack, ViewSwitcher, ViewSwitcherPolicy};
 
-use crate::niri_ipc::{NiriOutput, NiriWindow};
+use crate::niri_ipc::{NiriOutput, NiriWindow, NiriWorkspace};
 
 const PICKER_APP_ID: &str = "io.github.niri.screenshare.picker";
 
@@ -42,6 +43,8 @@ struct WindowItem {
     app_id: String,
     width: i32,
     height: i32,
+    /// Human-readable workspace/output, e.g. "workspace 2 · DP-1". May be empty.
+    location: String,
 }
 
 /// Cancellation is sticky even if Close arrives before the child is spawned.
@@ -59,7 +62,7 @@ pub fn show_picker_cancellable(
     child_slot: PickerChildSlot,
 ) -> Option<PickerChoice> {
     let displays: Vec<DisplayItem> = outputs.iter().map(DisplayItem::from).collect();
-    let wins: Vec<WindowItem> = windows.iter().map(WindowItem::from).collect();
+    let wins = window_items_with_niri_workspaces(windows);
 
     if displays.is_empty() && wins.is_empty() {
         return None;
@@ -181,7 +184,7 @@ fn write_picker_targets(
     displays: &[DisplayItem],
     windows: &[WindowItem],
 ) -> std::io::Result<()> {
-    // D:name\tw\th  W:id\ttitle\tapp\tw\th  END
+    // D:name\tw\th  W:id\ttitle\tapp\tw\th\tlocation  END
     for d in displays {
         writeln!(
             out,
@@ -194,12 +197,13 @@ fn write_picker_targets(
     for w in windows {
         writeln!(
             out,
-            "W:{}\t{}\t{}\t{}\t{}",
+            "W:{}\t{}\t{}\t{}\t{}\t{}",
             w.id,
             escape_field(&w.title),
             escape_field(&w.app_id),
             w.width,
-            w.height
+            w.height,
+            escape_field(&w.location)
         )?;
     }
     writeln!(out, "END")?;
@@ -243,12 +247,48 @@ fn read_targets_or_query_niri() -> (Vec<DisplayItem>, Vec<WindowItem>) {
         .iter()
         .map(DisplayItem::from)
         .collect();
-    let windows = crate::niri_ipc::list_windows()
-        .unwrap_or_default()
-        .iter()
-        .map(WindowItem::from)
-        .collect();
+    let windows =
+        window_items_with_niri_workspaces(&crate::niri_ipc::list_windows().unwrap_or_default());
     (displays, windows)
+}
+
+/// Workspace info is only decoration, so a failed lookup still lists windows.
+fn window_items_with_niri_workspaces(windows: &[NiriWindow]) -> Vec<WindowItem> {
+    if windows.is_empty() {
+        return Vec::new();
+    }
+    let workspaces = crate::niri_ipc::list_workspaces().unwrap_or_else(|e| {
+        tracing::warn!("list_workspaces failed: {e}");
+        Vec::new()
+    });
+    window_items(windows, &workspaces)
+}
+
+fn window_items(windows: &[NiriWindow], workspaces: &[NiriWorkspace]) -> Vec<WindowItem> {
+    windows
+        .iter()
+        .map(|w| {
+            let mut item = WindowItem::from(w);
+            item.location = w
+                .workspace_id
+                .and_then(|id| workspaces.iter().find(|ws| ws.id == id))
+                .map(workspace_label)
+                .unwrap_or_default();
+            item
+        })
+        .collect()
+}
+
+fn workspace_label(ws: &NiriWorkspace) -> String {
+    let mut label = match ws.name.as_deref() {
+        Some(name) if !name.is_empty() => format!("workspace {name}"),
+        _ => format!("workspace {}", ws.idx),
+    };
+    if let Some(output) = ws.output.as_deref().filter(|o| !o.is_empty()) {
+        label.push_str(" · ");
+        label.push_str(output);
+    }
+    label
 }
 
 fn read_targets_from_stdin() -> Option<(Vec<DisplayItem>, Vec<WindowItem>)> {
@@ -283,6 +323,7 @@ fn read_targets_from_stdin() -> Option<(Vec<DisplayItem>, Vec<WindowItem>)> {
                         app_id: unescape_field(parts[2]),
                         width: parts[3].parse().unwrap_or(0),
                         height: parts[4].parse().unwrap_or(0),
+                        location: parts.get(5).map(|p| unescape_field(p)).unwrap_or_default(),
                     });
                 }
             }
@@ -505,6 +546,9 @@ fn build_display_list(
             .activatable(true)
             .selectable(true)
             .build();
+        let icon = Image::from_icon_name("video-display-symbolic");
+        icon.set_pixel_size(ROW_ICON_SIZE);
+        row.add_prefix(&icon);
         list.append(&row);
     }
 
@@ -537,23 +581,16 @@ fn build_window_list(
         return list;
     }
 
+    let icon_theme = Display::default().map(|d| IconTheme::for_display(&d));
     for w in windows {
-        let title = if w.title.is_empty() {
-            w.app_id.clone()
-        } else {
-            w.title.clone()
-        };
-        let subtitle = if w.app_id.is_empty() || w.app_id == title {
-            format!("{}×{}", w.width, w.height)
-        } else {
-            format!("{} · {}×{}", w.app_id, w.width, w.height)
-        };
+        let title = window_title(w);
         let row = ActionRow::builder()
             .title(&title)
-            .subtitle(subtitle)
+            .subtitle(window_subtitle(w, &title))
             .activatable(true)
             .selectable(true)
             .build();
+        row.add_prefix(&app_icon(&w.app_id, icon_theme.as_ref()));
         list.append(&row);
     }
 
@@ -567,6 +604,75 @@ fn build_window_list(
     });
 
     list
+}
+
+const ROW_ICON_SIZE: i32 = 32;
+const FALLBACK_APP_ICON: &str = "application-x-executable";
+
+fn window_title(w: &WindowItem) -> String {
+    if w.title.is_empty() {
+        w.app_id.clone()
+    } else {
+        w.title.clone()
+    }
+}
+
+/// "app · workspace 2 · DP-1 · 1280×720", skipping parts that are empty or
+/// would repeat the title.
+fn window_subtitle(w: &WindowItem, title: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !w.app_id.is_empty() && w.app_id != title {
+        parts.push(w.app_id.clone());
+    }
+    if !w.location.is_empty() {
+        parts.push(w.location.clone());
+    }
+    parts.push(format!("{}×{}", w.width, w.height));
+    parts.join(" · ")
+}
+
+/// Desktop-file and icon-theme names commonly derived from a Wayland app_id,
+/// e.g. "org.mozilla.firefox" -> also "firefox".
+fn icon_name_candidates(app_id: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if !s.is_empty() && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+    push(app_id.to_string());
+    push(app_id.to_lowercase());
+    if let Some(last) = app_id.rsplit('.').next() {
+        push(last.to_string());
+        push(last.to_lowercase());
+    }
+    out
+}
+
+fn app_icon(app_id: &str, theme: Option<&IconTheme>) -> Image {
+    let image = resolve_app_icon(app_id, theme)
+        .map(|icon| Image::from_gicon(&icon))
+        .unwrap_or_else(|| Image::from_icon_name(FALLBACK_APP_ICON));
+    image.set_pixel_size(ROW_ICON_SIZE);
+    image
+}
+
+fn resolve_app_icon(app_id: &str, theme: Option<&IconTheme>) -> Option<gio::Icon> {
+    let candidates = icon_name_candidates(app_id);
+    // The desktop file's Icon= is the most reliable source; many apps' icon
+    // names differ from their app_id.
+    for id in &candidates {
+        if let Some(icon) =
+            gio::DesktopAppInfo::new(&format!("{id}.desktop")).and_then(|info| info.icon())
+        {
+            return Some(icon);
+        }
+    }
+    let theme = theme?;
+    candidates
+        .iter()
+        .find(|id| theme.has_icon(id))
+        .map(|id| gio::ThemedIcon::new(id).upcast())
 }
 
 fn empty_label(text: &str) -> Label {
@@ -596,6 +702,7 @@ impl From<&NiriWindow> for WindowItem {
             app_id: w.app_id.clone(),
             width: w.size.width,
             height: w.size.height,
+            location: String::new(),
         }
     }
 }
@@ -640,6 +747,113 @@ mod tests {
     #[test]
     fn initial_page_falls_back_to_displays_when_empty() {
         assert_eq!(initial_page(false, false), "displays");
+    }
+
+    fn item(title: &str, app_id: &str, location: &str) -> WindowItem {
+        WindowItem {
+            id: 1,
+            title: title.into(),
+            app_id: app_id.into(),
+            width: 1280,
+            height: 720,
+            location: location.into(),
+        }
+    }
+
+    fn niri_window(id: u64, workspace_id: Option<u64>) -> NiriWindow {
+        NiriWindow {
+            id,
+            title: String::new(),
+            app_id: String::new(),
+            size: crate::niri_ipc::Size {
+                width: 10,
+                height: 10,
+            },
+            workspace_id,
+        }
+    }
+
+    fn ws(id: u64, idx: u32, name: Option<&str>, output: Option<&str>) -> NiriWorkspace {
+        NiriWorkspace {
+            id,
+            idx,
+            name: name.map(Into::into),
+            output: output.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn workspace_label_uses_index_and_output() {
+        assert_eq!(
+            workspace_label(&ws(9, 2, None, Some("DP-1"))),
+            "workspace 2 · DP-1"
+        );
+    }
+
+    #[test]
+    fn workspace_label_prefers_name() {
+        assert_eq!(
+            workspace_label(&ws(9, 2, Some("web"), None)),
+            "workspace web"
+        );
+        assert_eq!(workspace_label(&ws(9, 2, Some(""), None)), "workspace 2");
+    }
+
+    #[test]
+    fn window_items_resolve_workspace_by_id() {
+        let windows = [
+            niri_window(1, Some(5)),
+            niri_window(2, Some(99)),
+            niri_window(3, None),
+        ];
+        let workspaces = [ws(5, 1, None, Some("HDMI-A-1"))];
+        let items = window_items(&windows, &workspaces);
+        assert_eq!(items[0].location, "workspace 1 · HDMI-A-1");
+        assert_eq!(items[1].location, "");
+        assert_eq!(items[2].location, "");
+    }
+
+    #[test]
+    fn subtitle_includes_app_location_and_size() {
+        let w = item("Mozilla Firefox", "firefox", "workspace 2 · DP-1");
+        assert_eq!(
+            window_subtitle(&w, &window_title(&w)),
+            "firefox · workspace 2 · DP-1 · 1280×720"
+        );
+    }
+
+    #[test]
+    fn subtitle_skips_app_id_equal_to_title_and_empty_location() {
+        let w = item("", "foot", "");
+        assert_eq!(window_subtitle(&w, &window_title(&w)), "1280×720");
+    }
+
+    #[test]
+    fn icon_candidates_cover_reverse_dns_app_ids() {
+        assert_eq!(
+            icon_name_candidates("org.Mozilla.Firefox"),
+            vec![
+                "org.Mozilla.Firefox",
+                "org.mozilla.firefox",
+                "Firefox",
+                "firefox"
+            ]
+        );
+        assert_eq!(icon_name_candidates("foot"), vec!["foot"]);
+        assert!(icon_name_candidates("").is_empty());
+    }
+
+    #[test]
+    fn target_protocol_roundtrips_location() {
+        let windows = vec![item("a\tb", "app", "workspace 2 · DP-1")];
+        let mut buf = Vec::new();
+        write_picker_targets(&mut buf, &[], &windows).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let line = text.lines().next().unwrap();
+        let parts: Vec<&str> = line.strip_prefix("W:").unwrap().split('\t').collect();
+        assert_eq!(parts.len(), 6);
+        assert_eq!(unescape_field(parts[1]), "a\tb");
+        assert_eq!(unescape_field(parts[5]), "workspace 2 · DP-1");
     }
 
     #[test]
