@@ -423,3 +423,21 @@ async fn close_immediately_after_start_does_not_race_request_registration() {
         .assert_unexported(START, "org.freedesktop.impl.portal.Request")
         .await;
 }
+
+#[cfg(feature = "picker")]
+#[tokio::test]
+async fn picker_eof_stops_an_outstanding_preview() {
+    let fixture = Fixture::new(true).await;
+    let conn = fixture.client.clone();
+    let (choice, reply) = tokio::task::spawn_blocking(move || {
+        let mut reply = Vec::new();
+        let targets = [pick::PickerChoice::Monitor("TEST-OUTPUT".into())];
+        let choice = pick::serve_picker(&conn, &targets, &b"OPEN 0\n"[..], &mut reply);
+        (choice, reply)
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply, b"42\n");
+    assert_eq!(choice, None);
+    assert_eq!(fixture.stops.load(Ordering::SeqCst), 1);
+}

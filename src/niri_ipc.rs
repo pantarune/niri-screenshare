@@ -9,9 +9,19 @@ pub struct Size {
     pub height: i32,
 }
 
+#[derive(Deserialize)]
+pub struct LogicalOutput {
+    #[serde(default)]
+    pub x: i32,
+    #[serde(default)]
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 pub struct NiriOutput {
     pub name: String,
-    pub logical: Size,
+    pub logical: LogicalOutput,
 }
 
 #[allow(dead_code)]
@@ -106,6 +116,18 @@ pub fn list_outputs() -> anyhow::Result<Vec<NiriOutput>> {
     parse_outputs(&raw)
 }
 
+#[cfg(feature = "picker")]
+pub fn output_is_being_cast() -> bool {
+    let Ok(out) = niri_command().args(["msg", "--json", "casts"]).output() else {
+        return false;
+    };
+    serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).is_ok_and(|casts| {
+        casts
+            .iter()
+            .any(|cast| cast["target"].get("Output").is_some())
+    })
+}
+
 pub fn list_windows() -> anyhow::Result<Vec<NiriWindow>> {
     let out = niri_command().args(["msg", "--json", "windows"]).output()?;
     if !out.status.success() {
@@ -172,27 +194,25 @@ fn parse_outputs(raw: &str) -> anyhow::Result<Vec<NiriOutput>> {
     #[derive(Deserialize)]
     struct OutputRaw {
         name: Option<String>,
-        logical: Option<SizeRaw>,
-    }
-    #[derive(Deserialize)]
-    struct SizeRaw {
-        width: i32,
-        height: i32,
+        logical: Option<LogicalOutput>,
     }
     let map: HashMap<String, OutputRaw> = serde_json::from_str(raw)?;
-    let outputs = map
+    let mut outputs: Vec<NiriOutput> = map
         .into_iter()
         .filter_map(|(key, out)| {
-            let logical = out.logical?;
             Some(NiriOutput {
                 name: out.name.unwrap_or(key),
-                logical: Size {
-                    width: logical.width,
-                    height: logical.height,
-                },
+                logical: out.logical?,
             })
         })
         .collect();
+    outputs.sort_by(|a, b| {
+        (a.logical.x, a.logical.y, a.name.as_str()).cmp(&(
+            b.logical.x,
+            b.logical.y,
+            b.name.as_str(),
+        ))
+    });
     Ok(outputs)
 }
 
@@ -353,5 +373,19 @@ mod tests {
             r#"[{"id": 1, "title": "a \"quoted\" name", "layout": {"window_size": [100, 100]}}]"#;
         let windows = parse_windows(raw).unwrap();
         assert_eq!(windows[0].title, "a \"quoted\" name");
+    }
+
+    #[test]
+    fn parse_outputs_reads_position_and_sorts_spatially() {
+        let raw = r#"{
+            "DP-1": {"name": "DP-1", "logical": {"x": 4672, "y": 0, "width": 900, "height": 1440}},
+            "HDMI-A-1": {"name": "HDMI-A-1", "logical": {"x": 0, "y": 0, "width": 1920, "height": 1080}},
+            "DP-2": {"name": "DP-2", "logical": {"x": 1920, "y": 0, "width": 2752, "height": 1152}}
+        }"#;
+        let outputs = parse_outputs(raw).unwrap();
+        let names: Vec<&str> = outputs.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec!["HDMI-A-1", "DP-2", "DP-1"]);
+        assert_eq!(outputs[1].logical.x, 1920);
+        assert_eq!(outputs[2].logical.x, 4672);
     }
 }

@@ -11,10 +11,10 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("check") | Some("--check") => cmd_check(),
-        Some("--picker") | Some("--debug-picker") => {
+        Some(_mode @ ("--picker" | "--debug-picker" | "--picker-ui")) => {
             #[cfg(feature = "picker")]
             {
-                match screencast::run_picker_process() {
+                match screencast::run_picker_process(_mode == "--picker-ui") {
                     Some(screencast::DebugPickerChoice::Monitor(name)) => {
                         println!("M:{name}");
                     }

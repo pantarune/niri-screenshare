@@ -1,6 +1,8 @@
 mod dispatch;
 #[cfg(feature = "picker")]
 mod pick;
+#[cfg(feature = "picker")]
+mod preview;
 mod request;
 
 #[cfg(test)]
@@ -352,8 +354,9 @@ impl ScreenCastInterface {
                 let session_id = session_handle.to_string();
                 let child_slot = self.picker.begin(&session_id);
                 let slot_for_task = child_slot.clone();
+                let conn = self.conn.clone();
                 let mut picker_task = tokio::task::spawn_blocking(move || {
-                    pick::show_picker_cancellable(&outputs, &windows, slot_for_task)
+                    pick::show_picker_cancellable(&outputs, &windows, slot_for_task, &conn)
                 });
                 let joined = tokio::select! {
                     biased;

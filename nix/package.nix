@@ -5,6 +5,8 @@
   wrapGAppsHook4,
   gtk4,
   libadwaita,
+  gst_all_1,
+  pipewire,
   dbus,
   withPicker ? true,
 }:
@@ -43,6 +45,9 @@ rustPlatform.buildRustPackage {
   buildInputs = lib.optionals withPicker [
     gtk4
     libadwaita
+    gst_all_1.gstreamer
+    gst_all_1.gst-plugins-base
+    pipewire
   ];
 
   # Start the GApps-wrapped $out/bin binary (schemas via XDG_DATA_DIRS).

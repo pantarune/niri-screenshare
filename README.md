@@ -34,7 +34,8 @@ For Arch Linux, the AUR package handles this automatically.
 
 ### Build from source (other distributions)
 
-The default picker build requires the `gtk4` and `libadwaita` system packages.
+The default picker build requires GTK 4.8+, libadwaita, and the GStreamer core
+and base development packages.
 Build without the picker via `cargo build --release --no-default-features`.
 
 ```sh
@@ -56,9 +57,22 @@ it does not replace the default backend for unrelated portal interfaces.
 ## behavior
 
 **picker mode (default)** — a GTK4 dialog with Displays / Windows tabs appears
-when an app requests screen sharing (OBS, Discord, Firefox, etc.). The requested
-XDG source types are respected, and the user must explicitly approve sharing
-even when only one capture target is available.
+when an app requests screen sharing (OBS, Discord, Firefox, etc.). It displays
+monitors in their physical arrangement and shows a snapshot of each available
+window. Press F5 to refresh the snapshots. The requested XDG source types are respected,
+and the user must explicitly approve sharing even when only one capture target
+is available.
+
+The picker skips previews when niri reports an existing output cast. To keep
+the picker private even if another recording starts while it is open, add this
+window rule to your niri configuration:
+
+```kdl
+window-rule {
+    match app-id=r#"^io\.github\.niri\.screenshare\.picker$"#
+    block-out-from "screen-capture"
+}
+```
 
 Set `NIRI_SCREENSHARE_NO_PICKER=1` to skip the dialog. Pickerless mode currently
 auto-selects the focused output and therefore supports monitor capture only; it
@@ -87,6 +101,7 @@ to that monitor. On NixOS, set
 | variable | effect |
 |----------|--------|
 | `NIRI_SCREENSHARE_NO_PICKER=1` | skip picker and auto-select the focused output |
+| `NIRI_SCREENSHARE_NO_PREVIEWS=1` | disable thumbnail preview capture in the picker |
 | `NIRI_SCREENSHARE_DYNAMIC_CAST=1` | bypass picker and use Niri's Dynamic Cast Target |
 | `NIRI_BIN=/path/to/niri` | override niri binary path (for NixOS etc.) |
 | `NIRI_SOCKET=/path/to/socket` | explicitly select the niri IPC socket |
@@ -142,8 +157,8 @@ Session objects expose the standard `version` property.
 
 ## dependencies
 
-- **runtime:** `xdg-desktop-portal`, `pipewire`, `niri`, `gtk4`, `libadwaita`
-- **build from source only:** Rust/Cargo, `gtk4`, `libadwaita`
+- **runtime:** `xdg-desktop-portal`, `pipewire`, `niri`, `gtk4`, `libadwaita`, and GStreamer with the PipeWire, base and OpenGL plugins for previews
+- **build from source only:** Rust/Cargo, `gtk4`, `libadwaita`, GStreamer core and base development packages
 
 The AUR binary package does **not** require the Rust toolchain. GTK4/libadwaita
 are not needed by a `--no-default-features` source build.

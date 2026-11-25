@@ -35,7 +35,7 @@ jobs:
           ref: ${{ steps.release.outputs.tag }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libgstreamer-plugins-base1.0-dev
       - name: Build default-feature binary
         run: cargo build --release --locked
       - name: Package binary
