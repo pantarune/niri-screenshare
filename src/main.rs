@@ -15,12 +15,7 @@ fn main() -> anyhow::Result<()> {
             #[cfg(feature = "picker")]
             {
                 match screencast::run_picker_process(_mode == "--picker-ui") {
-                    Some(screencast::DebugPickerChoice::Monitor(name)) => {
-                        println!("M:{name}");
-                    }
-                    Some(screencast::DebugPickerChoice::Window(id)) => {
-                        println!("W:{id}");
-                    }
+                    Some(choice) => choice.write_to(&mut std::io::stdout().lock())?,
                     None => {
                         std::process::exit(1);
                     }

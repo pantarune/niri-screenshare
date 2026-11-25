@@ -45,6 +45,16 @@ pub enum PickerChoice {
     Window(u64),
 }
 
+impl PickerChoice {
+    pub fn write_to(&self, out: &mut impl Write) -> std::io::Result<()> {
+        match self {
+            Self::Monitor(name) => writeln!(out, "M:{name}")?,
+            Self::Window(id) => writeln!(out, "W:{id}")?,
+        }
+        out.flush()
+    }
+}
+
 #[derive(Clone)]
 struct DisplayItem {
     name: String,
@@ -147,7 +157,7 @@ pub(super) fn serve_picker(
     conn: &zbus::Connection,
     targets: &[PickerChoice],
     commands: impl BufRead,
-    mut replies: impl Write,
+    replies: impl Write,
 ) -> Option<PickerChoice> {
     let rt = tokio::runtime::Handle::current();
     let stop = |path: &str| {
@@ -160,6 +170,7 @@ pub(super) fn serve_picker(
             }
         })
     };
+    let mut replies = Some(replies);
     let mut sessions = HashMap::new();
     let mut choice = None;
     for line in commands.lines().map_while(Result::ok) {
@@ -167,6 +178,9 @@ pub(super) fn serve_picker(
             .strip_prefix("OPEN ")
             .and_then(|s| s.parse::<usize>().ok())
         {
+            let Some(writer) = replies.as_mut() else {
+                continue;
+            };
             let mut node = None;
             if let Some(target) = targets.get(index) {
                 if sessions.len() < WORKERS && !sessions.contains_key(&index) {
@@ -180,13 +194,14 @@ pub(super) fn serve_picker(
                 }
             }
             if writeln!(
-                replies,
+                writer,
                 "{}",
                 node.map(|id| id.to_string()).unwrap_or_default()
             )
             .is_err()
             {
-                break;
+                // A final choice can still be buffered on the child's stdout.
+                replies = None;
             }
         } else if let Some(index) = line
             .strip_prefix("STOP ")
@@ -223,7 +238,7 @@ pub fn kill_slotted_picker(slot: &PickerChildSlot) {
 pub fn run_picker_process(ui: bool) -> Option<PickerChoice> {
     if ui {
         let (displays, windows) = read_targets_from_stdin()?;
-        return run_gtk_application(displays, windows);
+        run_gtk_application(displays, windows);
     }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -532,12 +547,8 @@ fn fit_aspect_box(max_w: i32, max_h: i32, width: i32, height: i32) -> (i32, i32)
     ((w.round() as i32).max(1), (h.round() as i32).max(1))
 }
 
-fn run_gtk_application(
-    displays: Vec<DisplayItem>,
-    windows: Vec<WindowItem>,
-) -> Option<PickerChoice> {
+fn run_gtk_application(displays: Vec<DisplayItem>, windows: Vec<WindowItem>) -> ! {
     let result: Rc<RefCell<Option<PickerChoice>>> = Rc::new(RefCell::new(None));
-
     let app = Application::builder()
         .application_id(PICKER_APP_ID)
         .flags(gio::ApplicationFlags::NON_UNIQUE)
@@ -558,8 +569,16 @@ fn run_gtk_application(
         tracing::warn!("picker gtk application exited with {exit:?}");
     }
 
-    let choice = result.borrow().clone();
-    choice
+    let accepted = exit == glib::ExitCode::SUCCESS
+        && result
+            .borrow()
+            .as_ref()
+            .is_some_and(|choice| choice.write_to(&mut std::io::stdout().lock()).is_ok());
+
+    // Only the private UI child exits here. GL workers may still be running,
+    // so skip driver atexit handlers. The supervisor stops sessions on EOF.
+    // SAFETY: _exit takes only an exit status and never returns.
+    unsafe { libc::_exit(if accepted { 0 } else { 1 }) }
 }
 
 fn build_and_present(
@@ -613,7 +632,9 @@ fn build_and_present(
         let result = result.clone();
         let selection = selection.clone();
         let window = window.clone();
+        let closed = closed.clone();
         move |accepted: bool| {
+            closed.store(true, Ordering::Relaxed);
             if accepted {
                 *result.borrow_mut() = selection.borrow().clone();
             }
@@ -720,6 +741,9 @@ fn build_and_present(
                         let closed = closed.clone();
                         let slot = &slots[index];
                         async move {
+                            if closed.load(Ordering::Relaxed) {
+                                return;
+                            }
                             let frame =
                                 gio::spawn_blocking(move || preview::capture(index, &closed)).await;
                             match frame {

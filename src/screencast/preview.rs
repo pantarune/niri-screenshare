@@ -66,8 +66,12 @@ pub(super) fn capture(index: usize, closed: &AtomicBool) -> anyhow::Result<Thumb
         .trim_end()
         .parse()
         .context("preview node unavailable")?;
-    let frame = snapshot(node, closed);
-    writeln!(std::io::stdout().lock(), "STOP {index}")?;
+    let frame = if closed.load(Ordering::Relaxed) {
+        Err(anyhow!("picker closed"))
+    } else {
+        snapshot(node, closed)
+    };
+    let _ = writeln!(std::io::stdout().lock(), "STOP {index}");
     frame
 }
 

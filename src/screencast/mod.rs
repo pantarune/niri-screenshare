@@ -9,7 +9,7 @@ mod request;
 mod lifecycle_tests;
 
 #[cfg(feature = "picker")]
-pub use pick::{run_picker_process, PickerChoice as DebugPickerChoice};
+pub use pick::run_picker_process;
 
 use std::collections::HashMap;
 use std::sync::Arc;

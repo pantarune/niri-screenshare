@@ -441,3 +441,24 @@ async fn picker_eof_stops_an_outstanding_preview() {
     assert_eq!(choice, None);
     assert_eq!(fixture.stops.load(Ordering::SeqCst), 1);
 }
+
+#[cfg(feature = "picker")]
+#[tokio::test]
+async fn broken_preview_reply_preserves_choice_and_stops_session() {
+    let fixture = Fixture::new(true).await;
+    let conn = fixture.client.clone();
+    let targets = [
+        pick::PickerChoice::Monitor("TEST-OUTPUT".into()),
+        pick::PickerChoice::Monitor("SECOND".into()),
+    ];
+    let choice = tokio::task::spawn_blocking(move || {
+        let (replies, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let commands = &b"OPEN 0\nOPEN 1\nM:SECOND\n"[..];
+        pick::serve_picker(&conn, &targets, commands, replies)
+    })
+    .await
+    .unwrap();
+    assert_eq!(choice, Some(pick::PickerChoice::Monitor("SECOND".into())));
+    assert_eq!(fixture.stops.load(Ordering::SeqCst), 1);
+}
